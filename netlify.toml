@@ -1,11 +1,32 @@
 [build]
   command = "npm run build"
-  publish = ".next"
+  # The @netlify/plugin-nextjs plugin selects the correct publish dir itself.
+  # Do not set `publish` manually — it breaks SSR / middleware on deploy.
 
 [build.environment]
   NODE_VERSION = "20"
   NPM_FLAGS = "--legacy-peer-deps"
+  NEXT_TELEMETRY_DISABLED = "1"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
+# Health endpoint never caches; everything else follows the plugin's defaults.
+[[headers]]
+  for = "/api/health"
+  [headers.values]
+    Cache-Control = "no-store, max-age=0"
+    X-Content-Type-Options = "nosniff"
+
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

@@ -17,6 +17,11 @@ const ReservationInput = z.object({
   source: z.string().trim().max(40).optional().default("Direct"),
   notes: z.string().trim().max(2000).optional().nullable(),
   externalRef: z.string().trim().optional().nullable(),
+  guests: z.union([z.string(), z.number()]).optional(),
+  children: z.union([z.string(), z.number()]).optional(),
+  pricePerNight: z.union([z.string(), z.number()]).optional(),
+  arrivalTime: z.string().optional(),
+  departTime: z.string().optional(),
 });
 
 function toIsoOrNull(v: string): string | null {
@@ -25,14 +30,17 @@ function toIsoOrNull(v: string): string | null {
   return d.toISOString();
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { data, error } = await supabaseAdmin
+  const { searchParams } = new URL(req.url);
+  const includeCancelled = searchParams.get("includeCancelled") === "1";
+  let query = supabaseAdmin
     .from("Reservation")
     .select("*, room:Room(code, label, entrance, capacity)")
-    .neq("status", "CANCELLED")
     .order("startDate");
+  if (!includeCancelled) query = query.neq("status", "CANCELLED");
+  const { data, error } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json(data);
 }
@@ -91,6 +99,11 @@ export async function POST(req: Request) {
     status: "CONFIRMED",
     color: getRoomColor(roomCode),
     externalRef: inboundRef,
+    guests: Number(parsed.data.guests) || 1,
+    children: Number(parsed.data.children) || 0,
+    pricePerNight: Number(parsed.data.pricePerNight) || 0,
+    arrivalTime: parsed.data.arrivalTime || "14:00",
+    departTime: parsed.data.departTime || "11:00",
   }).select().single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -102,6 +115,7 @@ export async function POST(req: Request) {
       type: "NEW",
       title: `Нова резервация · ${roomCode}`,
       detail: `${guestName} · ${source || "Direct"} · ${detailDates}`,
+      reservationId: data.id,
     });
     await supabaseAdmin.from("SyncEvent").insert({
       provider: (source || "direct").toLowerCase(),

@@ -15,7 +15,14 @@ const PatchInput = z.object({
   notes: z.string().trim().max(2000).optional().nullable(),
   status: z.enum(["CONFIRMED", "CANCELLED", "HOLD"]).optional(),
   color: z.string().optional(),
-}).strict();
+  roomCode: z.string().trim().optional(),
+  source: z.string().trim().max(40).optional(),
+  guests: z.union([z.string(), z.number()]).optional(),
+  children: z.union([z.string(), z.number()]).optional(),
+  pricePerNight: z.union([z.string(), z.number()]).optional(),
+  arrivalTime: z.string().optional(),
+  departTime: z.string().optional(),
+});
 
 function normalizeDate(v: string | undefined): string | undefined {
   if (!v) return undefined;
@@ -38,6 +45,13 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   if (update.startDate) update.startDate = normalizeDate(update.startDate);
   if (update.endDate)   update.endDate   = normalizeDate(update.endDate);
 
+  // If roomCode changed, resolve the new room ID
+  if (update.roomCode) {
+    const { data: newRoom } = await supabaseAdmin
+      .from("Room").select("id").eq("code", update.roomCode).maybeSingle();
+    if (newRoom) update.roomId = newRoom.id;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("Reservation")
     .update(update)
@@ -48,15 +62,31 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   if (!data) return NextResponse.json({ error: "Reservation not found" }, { status: 404 });
 
   if (update.status === "CANCELLED") {
+    // Set cancelledAt timestamp for 24h revert window
+    try {
+      await supabaseAdmin.from("Reservation")
+        .update({ cancelledAt: new Date().toISOString() })
+        .eq("id", params.id);
+    } catch {}
     try {
       await supabaseAdmin.from("Notification").insert({
         type: "CANCEL",
         title: `Анулирана резервация · ${data.roomCode}`,
         detail: `${data.guestName} · ${String(data.startDate).slice(0, 10)} – ${String(data.endDate).slice(0, 10)}`,
+        reservationId: data.id,
       });
     } catch (e) {
       console.error("[reservations PATCH] notify failure", e);
     }
+  }
+
+  // If reverting a cancellation
+  if (update.status === "CONFIRMED" && data.cancelledAt) {
+    try {
+      await supabaseAdmin.from("Reservation")
+        .update({ cancelledAt: null })
+        .eq("id", params.id);
+    } catch {}
   }
 
   // Outbound Beds24 push — update or cancel depending on status.

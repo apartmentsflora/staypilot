@@ -21,14 +21,15 @@ const CHIP_COLORS: Record<string,string> = {
   "Beds24":"#f0fdf4|#86efac|#14532d",
   "Директна":"#f5f3ff|#c4b5fd|#3b0764",
   "Уебсайт":"#f0fdfa|#5eead4|#134e4a",
+  "Airbnb":"#fff1f2|#fda4af|#881337",
 };
 function chipStyle(src: string) {
   const c = CHIP_COLORS[src] || "#f9fafb|#d1d5db|#374151";
   const [bg,bd,tx] = c.split("|");
   return { bg, bd, tx };
 }
-// Voice parsing now lives in lib/voice.ts so it can be unit-tested and
-// extended without touching the calendar UI.
+
+const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", arrivalTime:"14:00", departTime:"11:00" };
 
 // ── main component ────────────────────────────────────────────────────────────
 export default function CalendarPage() {
@@ -41,14 +42,19 @@ export default function CalendarPage() {
   const [reservations, setReservations] = useState<any[]>([]);
   const [filters, setFilters] = useState({ bk:true, b2:true, ph:true, dr:true, web:true });
   const [modal, setModal] = useState(false);
+  const [editingRes, setEditingRes] = useState<any>(null); // null = new, object = editing
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceParsed, setVoiceParsed] = useState<any>(null);
   const [voiceStatus, setVoiceStatus] = useState<"idle"|"listening"|"processing">("idle");
   const [transcript, setTranscript] = useState("");
   const recogRef = useRef<any>(null);
+  const [cancelConfirm, setCancelConfirm] = useState<any>(null);
+  const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
+  const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|null>(null);
+  const lastFetchRef = useRef<string>("");
 
   // Form state
-  const [form, setForm] = useState({ guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80 });
+  const [form, setForm] = useState<any>({...EMPTY_FORM});
   const nights = useMemo(() => {
     if (!form.startDate || !form.endDate) return 1;
     return Math.max(1, Math.round((parseD(form.endDate).getTime() - parseD(form.startDate).getTime()) / 86400000));
@@ -57,34 +63,99 @@ export default function CalendarPage() {
   const load = useCallback(async () => {
     const [rRes, bRes] = await Promise.all([fetch("/api/rooms"), fetch("/api/reservations")]);
     if (rRes.ok) setRooms(await rRes.json());
-    if (bRes.ok) setReservations(await bRes.json());
+    if (bRes.ok) {
+      const data = await bRes.json();
+      setReservations(data);
+      lastFetchRef.current = new Date().toISOString();
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  // Preload voice form dates when modal opens
+  // ── Auto-refresh every 10 seconds (incremental) ──────────────────────────
   useEffect(() => {
-    if (modal) {
+    const iv = setInterval(async () => {
+      try {
+        const res = await fetch("/api/reservations");
+        if (res.ok) {
+          const data = await res.json();
+          setReservations(prev => {
+            // Check if anything changed
+            if (JSON.stringify(prev.map((r:any)=>r.id+r.status+r.updatedAt)) === JSON.stringify(data.map((r:any)=>r.id+r.status+r.updatedAt))) return prev;
+            // Something changed — check for new reservations for push notification
+            const prevIds = new Set(prev.map((r:any)=>r.id));
+            const newOnes = data.filter((r:any) => !prevIds.has(r.id));
+            for (const n of newOnes) {
+              if (Notification.permission === "granted") {
+                new Notification("Нова резервация", {
+                  body: `${n.guestName} · Стая ${n.roomCode} · ${n.startDate?.slice(0,10)} – ${n.endDate?.slice(0,10)}`,
+                  icon: "/favicon.ico",
+                  tag: `res-${n.id}`,
+                });
+              }
+            }
+            return data;
+          });
+          lastFetchRef.current = new Date().toISOString();
+        }
+      } catch {}
+    }, 10000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ── Request notification permission on mount ─────────────────────────────
+  useEffect(() => {
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Preload form when modal opens
+  useEffect(() => {
+    if (modal && !editingRes) {
       const end = toDS(addD(parseD(sel), 1));
-      setForm(f => ({
-        ...f,
+      setForm({
+        ...EMPTY_FORM,
         startDate: voiceParsed?.start || sel,
         endDate: voiceParsed?.end || end,
-        guestName: voiceParsed?.name || f.guestName,
-        phone: voiceParsed?.phone || f.phone,
-        roomCode: voiceParsed?.room || f.roomCode,
-        email: voiceParsed?.email || (f as any).email || "",
-        notes: voiceParsed?.notes || f.notes,
-        guests: voiceParsed?.guests || (f as any).guests || "",
-        pricePerNight: voiceParsed?.pricePerNight || f.pricePerNight,
-        arrivalTime: voiceParsed?.arrivalTime || (f as any).arrivalTime || "14:00",
-        departTime: voiceParsed?.departureTime || (f as any).departTime || "11:00",
-      }));
+        guestName: voiceParsed?.name || "",
+        phone: voiceParsed?.phone || "",
+        roomCode: voiceParsed?.room || "",
+        email: voiceParsed?.email || "",
+        notes: voiceParsed?.notes || "",
+        guests: voiceParsed?.guests || "2",
+        children: "0",
+        pricePerNight: voiceParsed?.pricePerNight || 80,
+        arrivalTime: voiceParsed?.arrivalTime || "14:00",
+        departTime: voiceParsed?.departureTime || "11:00",
+      });
     }
-  }, [modal, sel, voiceParsed]);
+  }, [modal, sel, voiceParsed, editingRes]);
+
+  // Load form from editing reservation
+  useEffect(() => {
+    if (editingRes) {
+      setForm({
+        guestName: editingRes.guestName || "",
+        phone: editingRes.phone || "",
+        email: editingRes.email || "",
+        roomCode: editingRes.roomCode || "",
+        startDate: editingRes.startDate?.slice(0,10) || "",
+        endDate: editingRes.endDate?.slice(0,10) || "",
+        source: editingRes.source || "Телефон",
+        notes: editingRes.notes || "",
+        pricePerNight: editingRes.pricePerNight || 80,
+        guests: String(editingRes.guests || 2),
+        children: String(editingRes.children || 0),
+        arrivalTime: editingRes.arrivalTime || "14:00",
+        departTime: editingRes.departTime || "11:00",
+      });
+    }
+  }, [editingRes]);
 
   // ── filter + derived ──────────────────────────────────────────────────────
   const visRes = useMemo(() => reservations.filter(r => {
+    if (r.status === "CANCELLED") return false;
     if (r.source==="Booking" && !filters.bk) return false;
     if (r.source==="Beds24"  && !filters.b2) return false;
     if (r.source==="Телефон" && !filters.ph) return false;
@@ -95,6 +166,20 @@ export default function CalendarPage() {
 
   const activeOn  = useCallback((ds: string) => visRes.filter(r => inRange(ds, r)), [visRes]);
   const checkouts = useCallback((ds: string) => visRes.filter(r => r.endDate.slice(0,10) === ds), [visRes]);
+
+  // ── Available rooms for selected dates (filter booked ones) ───────────────
+  const availableRooms = useMemo(() => {
+    if (!form.startDate || !form.endDate) return rooms;
+    const s = form.startDate;
+    const e = form.endDate;
+    const bookedCodes = new Set(
+      reservations
+        .filter(r => r.status !== "CANCELLED" && r.startDate.slice(0,10) < e && r.endDate.slice(0,10) > s)
+        .filter(r => !editingRes || r.id !== editingRes.id) // exclude current reservation when editing
+        .map(r => r.roomCode)
+    );
+    return rooms.filter(r => !bookedCodes.has(r.code));
+  }, [rooms, reservations, form.startDate, form.endDate, editingRes]);
 
   // ── calendar grid ─────────────────────────────────────────────────────────
   const calGrid = useMemo(() => {
@@ -110,23 +195,37 @@ export default function CalendarPage() {
   // ── voice ─────────────────────────────────────────────────────────────────
   function startVoice() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { alert("Гласовото попълване изисква Chrome браузър."); return; }
+    if (!SR) { alert("Гласовото попълване не се поддържа в този браузър. Моля, използвайте Chrome, Safari или Edge."); return; }
     const rec = new SR();
-    rec.lang = "bg-BG"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 3;
+    rec.lang = "bg-BG";
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 3;
     recogRef.current = rec;
-    setVoiceStatus("listening"); setTranscript("");
+    setVoiceStatus("listening");
+    setTranscript("");
     rec.onresult = (e: any) => {
-      const t = Array.from(e.results as any[]).map((r: any) => r[0].transcript).join(" ");
-      setTranscript(t);
-      if (e.results[0].isFinal) {
+      let finalT = "";
+      let interimT = "";
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalT += e.results[i][0].transcript;
+        else interimT += e.results[i][0].transcript;
+      }
+      setTranscript(finalT + interimT);
+      if (finalT) {
         setVoiceStatus("processing");
-        const parsed = parseVoice(t, yr);
+        const parsed = parseVoice(finalT, yr);
         setVoiceParsed(parsed);
         setVoiceStatus("idle");
       }
     };
-    rec.onerror = () => setVoiceStatus("idle");
-    rec.onend = () => { if (voiceStatus === "listening") setVoiceStatus("idle"); };
+    rec.onerror = (e: any) => {
+      console.warn("Voice error:", e.error);
+      setVoiceStatus("idle");
+    };
+    rec.onend = () => {
+      setVoiceStatus(prev => prev === "listening" ? "idle" : prev);
+    };
     rec.start();
   }
 
@@ -136,20 +235,46 @@ export default function CalendarPage() {
   }
 
   function confirmVoice() {
-    stopVoice(); setVoiceOpen(false); setModal(true);
+    stopVoice(); setVoiceOpen(false); setEditingRes(null); setModal(true);
+  }
+
+  // ── open new reservation modal ────────────────────────────────────────────
+  function openNewRes(date?: string) {
+    setEditingRes(null);
+    setVoiceParsed(null);
+    if (date) setSel(date);
+    setModal(true);
+  }
+
+  // ── open edit reservation modal ───────────────────────────────────────────
+  function openEditRes(r: any) {
+    setEditingRes(r);
+    setSel(r.startDate.slice(0,10));
+    setModal(true);
   }
 
   // ── save reservation ──────────────────────────────────────────────────────
   async function saveRes() {
     if (!form.guestName.trim() || !form.roomCode || !form.startDate || !form.endDate) return;
-    const res = await fetch("/api/reservations", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ ...form }),
-    });
+    const payload = { ...form, guests: Number(form.guests)||1, children: Number(form.children)||0, pricePerNight: Number(form.pricePerNight)||0 };
+
+    let res;
+    if (editingRes) {
+      res = await fetch(`/api/reservations/${editingRes.id}`, {
+        method: "PATCH",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload),
+      });
+    } else {
+      res = await fetch("/api/reservations", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload),
+      });
+    }
     if (res.ok) {
-      setModal(false); setVoiceParsed(null);
-      setForm({ guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80 });
+      setModal(false); setEditingRes(null); setVoiceParsed(null);
+      setForm({...EMPTY_FORM});
       await load();
     } else {
       const e = await res.json();
@@ -157,21 +282,53 @@ export default function CalendarPage() {
     }
   }
 
-  async function cancelRes(id: string) {
+  // ── cancel with confirmation ──────────────────────────────────────────────
+  async function doCancel(id: string) {
     await fetch(`/api/reservations/${id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ status:"CANCELLED" }) });
+    setCancelConfirm(null);
+    setDetailRes(null);
+    setModal(false);
+    await load();
+  }
+
+  // ── revert cancellation ───────────────────────────────────────────────────
+  async function revertCancel(id: string) {
+    await fetch(`/api/reservations/${id}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ status:"CONFIRMED" }) });
     await load();
   }
 
   const activeToday = activeOn(sel);
   const coToday = checkouts(sel);
   const todayStr = toDS(now);
+  const activeTodayReal = activeOn(todayStr);
+  const coTodayReal = checkouts(todayStr);
+
+  // ── CSS for mobile ────────────────────────────────────────────────────────
+  const mobileCSS = `
+    @media (max-width: 768px) {
+      .modal-grid { grid-template-columns: 1fr !important; }
+      .modal-right { display: none !important; }
+      .form-grid { grid-template-columns: 1fr !important; }
+      .form-grid > div { grid-column: span 1 !important; }
+      .bottom-panels { grid-template-columns: 1fr !important; }
+      .topbar-wrap { flex-direction: column; align-items: stretch !important; }
+      .today-cards { grid-template-columns: 1fr !important; }
+      .today-card { cursor: pointer; }
+    }
+  `;
 
   // ── render ────────────────────────────────────────────────────────────────
   return (
-    <DashboardShell stats={{ active: activeOn(todayStr).length, occ: Math.round(activeOn(todayStr).length/18*100), rev: 0, month: mo, selFmt: fmtS(sel) }}>
+    <DashboardShell
+      stats={{ active: activeTodayReal.length, occ: Math.round(activeTodayReal.length/18*100), rev: 0, month: mo, selFmt: fmtS(sel) }}
+      onNewRes={() => openNewRes()}
+      onTodayRes={() => setTodayFullScreen("res")}
+      onTodayCo={() => setTodayFullScreen("co")}
+    >
+      <style dangerouslySetInnerHTML={{__html: mobileCSS}} />
       <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
         {/* TOPBAR */}
-        <div style={{ background:"#fff", borderBottom:"1px solid #e5e2dc", padding:"10px 18px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"10px", flexWrap:"wrap", flexShrink:0 }}>
+        <div className="topbar-wrap" style={{ background:"#fff", borderBottom:"1px solid #e5e2dc", padding:"10px 18px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"10px", flexWrap:"wrap", flexShrink:0 }}>
           <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
             <button onClick={() => { const d = new Date(yr,mo-1,1); setYr(d.getFullYear()); setMo(d.getMonth()); }}
               style={{ background:"#f5f3ef", border:"1px solid #dedad4", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"16px" }}>‹</button>
@@ -180,7 +337,7 @@ export default function CalendarPage() {
               style={{ background:"#f5f3ef", border:"1px solid #dedad4", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"16px" }}>›</button>
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:"7px", flexWrap:"wrap" }}>
-            {(["bk","b2","ph","dr","web"] as const).map((k,i) => {
+            {(["bk","b2","ph","dr","web"] as const).map((k) => {
               const labels = { bk:"Booking.com", b2:"Beds24", ph:"Телефон", dr:"Директна", web:"Уебсайт" };
               return (
                 <button key={k} onClick={() => setFilters(f => ({...f, [k]:!f[k]}))}
@@ -190,10 +347,10 @@ export default function CalendarPage() {
               );
             })}
             <div style={{ display:"flex", alignItems:"center", gap:"5px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"7px", padding:"5px 10px", fontSize:"11px", color:"#15803d" }}>
-              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#22c55e" }} />
-              Синхр. активна
+              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#22c55e", animation:"pulse 2s infinite" }} />
+              Синхр. активна · 10с
             </div>
-            <button onClick={() => { setSel(toDS(now)); setModal(true); }}
+            <button onClick={() => openNewRes(toDS(now))}
               style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"7px 14px", fontSize:"12px", fontWeight:"600", cursor:"pointer" }}>
               + Нова резервация
             </button>
@@ -214,7 +371,7 @@ export default function CalendarPage() {
                 const isToday = ds === todayStr;
                 const dr = activeOn(ds);
                 return (
-                  <div key={ds} onClick={() => { setSel(ds); setModal(true); }}
+                  <div key={ds} onClick={() => { setSel(ds); openNewRes(ds); }}
                     style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", padding:"7px 6px", minHeight:"120px", cursor:"pointer", background: isSel ? "#f0efff" : "white", outline: isSel ? "2px solid #6c63ff" : "none", outlineOffset:"-2px", opacity: outside ? 0.4 : 1, transition:"background .1s" }}>
                     <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"5px" }}>
                       <span style={{ fontSize:"12px", fontWeight:"600", color: isToday ? "#fff" : "#333", background: isToday ? "#6c63ff" : "transparent", borderRadius: isToday ? "50%" : "0", width: isToday ? "21px" : "auto", height: isToday ? "21px" : "auto", display:"flex", alignItems:"center", justifyContent:"center" }}>{dt.getDate()}</span>
@@ -224,7 +381,7 @@ export default function CalendarPage() {
                       const cs = chipStyle(r.source);
                       return (
                         <div key={r.id} style={{ borderRadius:"7px", padding:"5px 7px", marginBottom:"3px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, display:"flex", alignItems:"center", gap:"5px" }}
-                          onClick={e => { e.stopPropagation(); setSel(ds); setModal(true); }}>
+                          onClick={e => { e.stopPropagation(); openEditRes(r); }}>
                           <div style={{ width:"18px", height:"18px", borderRadius:"50%", background:cs.bd, color:cs.tx, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"8px", fontWeight:"700", flexShrink:0 }}>
                             {(r.guestName||"?")[0].toUpperCase()}
                           </div>
@@ -239,6 +396,62 @@ export default function CalendarPage() {
                   </div>
                 );
               })}
+            </div>
+          </div>
+
+          {/* TODAY PANELS — above timeline */}
+          <div className="today-cards" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"12px", marginBottom:"14px" }}>
+            {/* Reservations for selected date */}
+            <div className="today-card" style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"13px 15px" }}
+              onClick={() => { if (window.innerWidth <= 768) setTodayFullScreen("res"); }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
+                <span style={{ fontSize:"13px", fontWeight:"700" }}>Резервации за {fmtS(sel)}</span>
+                <span style={{ fontSize:"10px", color:"#6c63ff", cursor:"pointer" }} onClick={(e) => { e.stopPropagation(); setTodayFullScreen("res"); }}>Виж всички →</span>
+              </div>
+              {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма активни резервации.</div>}
+              {activeToday.slice(0,4).map(r => {
+                const cs = chipStyle(r.source);
+                return (
+                  <div key={r.id} onClick={e => { e.stopPropagation(); openEditRes(r); }}
+                    style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer", transition:"transform .1s" }}>
+                    <div style={{ display:"flex", alignItems:"flex-start", gap:"9px" }}>
+                      <div style={{ width:"30px", height:"30px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"11px", fontWeight:"700", flexShrink:0 }}>{(r.guestName||"?")[0]}</div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:"13px", fontWeight:"700" }}>{r.guestName}</div>
+                        <div style={{ fontSize:"11px", opacity:.75, marginTop:"2px" }}>Стая {r.roomCode} · {r.phone}</div>
+                        <div style={{ fontSize:"11px", opacity:.65, marginTop:"1px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}</div>
+                        {r.notes && <div style={{ fontSize:"11px", opacity:.6, marginTop:"3px", fontStyle:"italic" }}>{r.notes}</div>}
+                        <div style={{ display:"flex", gap:"5px", marginTop:"6px", flexWrap:"wrap" }}>
+                          <span style={{ fontSize:"10px", padding:"2px 6px", borderRadius:"4px", background:cs.bd, color:"#fff", fontWeight:"500" }}>{r.source}</span>
+                        </div>
+                      </div>
+                      <button onClick={e => { e.stopPropagation(); setCancelConfirm(r); }}
+                        style={{ fontSize:"10px", padding:"3px 8px", borderRadius:"5px", background:"rgba(255,255,255,.6)", border:`1px solid ${cs.bd}`, cursor:"pointer", color:cs.tx, flexShrink:0 }}>Анулирай</button>
+                    </div>
+                  </div>
+                );
+              })}
+              {activeToday.length > 4 && <div style={{ fontSize:"11px", color:"#999", textAlign:"center" }}>+{activeToday.length-4} още</div>}
+            </div>
+
+            {/* Checkouts */}
+            <div className="today-card" style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"13px 15px" }}
+              onClick={() => { if (window.innerWidth <= 768) setTodayFullScreen("co"); }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
+                <span style={{ fontSize:"13px", fontWeight:"700" }}>Освобождавания за {fmtS(sel)}</span>
+                <span style={{ fontSize:"10px", color:"#6c63ff", cursor:"pointer" }} onClick={(e) => { e.stopPropagation(); setTodayFullScreen("co"); }}>Виж всички →</span>
+              </div>
+              {coToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма освобождавания.</div>}
+              {coToday.map(r => (
+                <div key={r.id} onClick={e => { e.stopPropagation(); openEditRes(r); }}
+                  style={{ display:"flex", alignItems:"center", gap:"9px", padding:"8px 10px", background:"#fffbf0", borderRadius:"8px", marginBottom:"6px", borderLeft:"3px solid #f59e0b", cursor:"pointer" }}>
+                  <div style={{ width:"28px", height:"28px", borderRadius:"50%", background:"#fcd34d", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", fontWeight:"700" }}>{(r.guestName||"?")[0]}</div>
+                  <div>
+                    <div style={{ fontSize:"12px", fontWeight:"700" }}>{r.guestName}</div>
+                    <div style={{ fontSize:"11px", color:"#aaa" }}>Стая {r.roomCode} · {r.phone || ""}</div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -277,7 +490,7 @@ export default function CalendarPage() {
                           <td key={ds} style={{ borderBottom:"1px solid #f0ede8", borderRight:"1px solid #f0ede8", padding:"4px 5px", height:"52px", background: isSel ? "#f9f8ff" : "#fff", verticalAlign:"middle" }}>
                             {res && cs ? (
                               <div style={{ borderRadius:"6px", padding:"4px 7px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, height:"44px", display:"flex", flexDirection:"column", justifyContent:"center", cursor:"pointer" }}
-                                onClick={() => { setSel(ds); setModal(true); }}>
+                                onClick={() => openEditRes(res)}>
                                 <div style={{ fontWeight:"700", fontSize:"11px", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{res.guestName.split(" ")[0]}</div>
                                 <div style={{ fontSize:"9px", opacity:.7 }}>{fmtS(res.startDate.slice(0,10))}–{fmtS(res.endDate.slice(0,10))}</div>
                               </div>
@@ -293,128 +506,122 @@ export default function CalendarPage() {
               </table>
             </div>
           </div>
-
-          {/* BOTTOM PANELS */}
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"12px", marginBottom:"14px" }}>
-            <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"13px 15px" }}>
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
-                <span style={{ fontSize:"13px", fontWeight:"700" }}>Резервации за {fmtS(sel)}</span>
-              </div>
-              {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма активни резервации.</div>}
-              {activeToday.map(r => {
-                const cs = chipStyle(r.source);
-                return (
-                  <div key={r.id} style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx }}>
-                    <div style={{ display:"flex", alignItems:"flex-start", gap:"9px" }}>
-                      <div style={{ width:"30px", height:"30px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"11px", fontWeight:"700", flexShrink:0 }}>{(r.guestName||"?")[0]}</div>
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontSize:"13px", fontWeight:"700" }}>{r.guestName}</div>
-                        <div style={{ fontSize:"11px", opacity:.75, marginTop:"2px" }}>Стая {r.roomCode} · {r.phone}</div>
-                        <div style={{ fontSize:"11px", opacity:.65, marginTop:"1px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}</div>
-                        {r.notes && <div style={{ fontSize:"11px", opacity:.6, marginTop:"3px", fontStyle:"italic" }}>{r.notes}</div>}
-                        <div style={{ display:"flex", gap:"5px", marginTop:"6px", flexWrap:"wrap" }}>
-                          <span style={{ fontSize:"10px", padding:"2px 6px", borderRadius:"4px", background:cs.bd, color:cs.tx, fontWeight:"500" }}>{r.source}</span>
-                        </div>
-                      </div>
-                      <button onClick={() => cancelRes(r.id)} style={{ fontSize:"10px", padding:"3px 8px", borderRadius:"5px", background:"rgba(255,255,255,.6)", border:`1px solid ${cs.bd}`, cursor:"pointer", color:cs.tx, flexShrink:0 }}>Анулирай</button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"13px 15px" }}>
-              <div style={{ fontSize:"13px", fontWeight:"700", marginBottom:"10px" }}>Освобождавания за {fmtS(sel)}</div>
-              {coToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма освобождавания.</div>}
-              {coToday.map(r => (
-                <div key={r.id} style={{ display:"flex", alignItems:"center", gap:"9px", padding:"8px 10px", background:"#fffbf0", borderRadius:"8px", marginBottom:"6px", borderLeft:"3px solid #f59e0b" }}>
-                  <div style={{ width:"28px", height:"28px", borderRadius:"50%", background:"#fcd34d", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", fontWeight:"700" }}>{(r.guestName||"?")[0]}</div>
-                  <div>
-                    <div style={{ fontSize:"12px", fontWeight:"700" }}>{r.guestName}</div>
-                    <div style={{ fontSize:"11px", color:"#aaa" }}>Стая {r.roomCode} · освобождава на {fmtS(sel)}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
 
-      {/* RESERVATION MODAL */}
+      {/* ═══════════ RESERVATION MODAL (new + edit) ═══════════ */}
       {modal && (
         <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.6)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"24px 14px", zIndex:100, overflowY:"auto" }}
-          onClick={e => { if (e.currentTarget === e.target) { setModal(false); setVoiceParsed(null); } }}>
+          onClick={e => { if (e.currentTarget === e.target) { setModal(false); setEditingRes(null); setVoiceParsed(null); } }}>
           <div style={{ background:"#fff", borderRadius:"16px", width:"880px", maxWidth:"100%", overflow:"hidden", border:"1px solid #e5e2dc", boxShadow:"0 30px 90px rgba(0,0,0,.35)" }}>
             <div style={{ background:"#12121c", padding:"16px 22px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
               <div>
-                <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>Нова резервация · {fmtS(sel)}</div>
-                <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>Заетите стаи се скриват автоматично · Синхронизира се с Beds24 и Booking.com</div>
+                <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>
+                  {editingRes ? `Редактиране · ${editingRes.guestName}` : `Нова резервация · ${fmtS(sel)}`}
+                </div>
+                <div style={{ fontSize:"12px", color:"#a09fff", marginTop:"4px", background:"rgba(108,99,255,.15)", display:"inline-block", padding:"3px 10px", borderRadius:"5px", border:"1px solid rgba(108,99,255,.3)" }}>
+                  Синхронизира се с Beds24 и Booking.com
+                </div>
               </div>
               <div style={{ display:"flex", gap:"8px" }}>
-                <button onClick={() => { setModal(false); setVoiceOpen(true); }} style={{ background:"#1e1e2e", color:"#a09fff", border:"1px solid #2a2a40", borderRadius:"7px", padding:"6px 12px", cursor:"pointer", fontSize:"12px" }}>🎤 Гласово</button>
-                <button onClick={() => { setModal(false); setVoiceParsed(null); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
+                {!editingRes && (
+                  <button onClick={() => { setModal(false); setVoiceOpen(true); }} style={{ background:"#1e1e2e", color:"#a09fff", border:"1px solid #2a2a40", borderRadius:"7px", padding:"6px 12px", cursor:"pointer", fontSize:"12px" }}>🎤 Гласово</button>
+                )}
+                <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
               </div>
             </div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr" }}>
+            <div className="modal-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr" }}>
               <div style={{ padding:"18px 20px", borderRight:"1px solid #f0ede8" }}>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"9px" }}>
+                <div className="form-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"9px" }}>
                   {[
-                    { label:"Гост", id:"guestName", placeholder:"Иван Петров" },
+                    { label:"Гост", id:"guestName", placeholder:"Иван Петров", span:true },
                     { label:"Телефон", id:"phone", placeholder:"+359888..." },
                     { label:"Email", id:"email", placeholder:"guest@example.com" },
-                    { label:"Брой гости", id:"guests", placeholder:"2", type:"number" },
+                    { label:"Брой възрастни", id:"guests", placeholder:"2", type:"number" },
+                    { label:"Брой деца", id:"children", placeholder:"0", type:"number" },
                     { label:"Дата начало", id:"startDate", type:"date" },
                     { label:"Дата край", id:"endDate", type:"date" },
-                    { label:"Час пристигане", id:"arrivalTime", type:"time", defaultVal:"14:00" },
-                    { label:"Час заминаване", id:"departTime", type:"time", defaultVal:"11:00" },
+                    { label:"Час пристигане", id:"arrivalTime", type:"time" },
+                    { label:"Час заминаване", id:"departTime", type:"time" },
                     { label:"Цена / нощ (€)", id:"pricePerNight", type:"number" },
                   ].map(f => (
-                    <div key={f.id} style={f.id==="guestName"||f.id==="email"||f.id==="notes"?{gridColumn:"span 1"}:{}}>
+                    <div key={f.id} style={f.span ? {gridColumn:"1 / -1"} : {}}>
                       <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>{f.label.toUpperCase()}</label>
-                      <input type={f.type||"text"} placeholder={f.placeholder||""} value={(form as any)[f.id]||f.defaultVal||""}
-                        onChange={e => setForm(prev => ({...prev, [f.id]: e.target.value}))}
-                        style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none" }} />
+                      <input type={f.type||"text"} placeholder={f.placeholder||""} value={form[f.id]||""}
+                        onChange={e => setForm((prev:any) => ({...prev, [f.id]: e.target.value}))}
+                        style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none", boxSizing:"border-box" }} />
                     </div>
                   ))}
                 </div>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"9px", marginTop:"9px" }}>
+                <div className="form-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"9px", marginTop:"9px" }}>
                   <div>
                     <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>СТАЯ</label>
-                    <select value={form.roomCode} onChange={e => setForm(f => ({...f,roomCode:e.target.value}))}
-                      style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none" }}>
+                    <select value={form.roomCode} onChange={e => setForm((f:any) => ({...f,roomCode:e.target.value}))}
+                      style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none", boxSizing:"border-box" }}>
                       <option value="">Избери стая...</option>
-                      {rooms.map(r => <option key={r.id} value={r.code}>{r.code} · Вход {r.entrance} · {r.label} ({r.capacity} г.)</option>)}
+                      {availableRooms.map(r => <option key={r.id} value={r.code}>{r.code} · Вход {r.entrance} · {r.label} ({r.capacity} г.)</option>)}
+                      {editingRes && !availableRooms.find((r:any) => r.code === form.roomCode) && form.roomCode && (
+                        <option value={form.roomCode}>{form.roomCode} (текуща стая)</option>
+                      )}
                     </select>
                   </div>
                   <div>
                     <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>ИЗТОЧНИК</label>
-                    <select value={form.source} onChange={e => setForm(f => ({...f,source:e.target.value}))}
-                      style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none" }}>
+                    <select value={form.source} onChange={e => setForm((f:any) => ({...f,source:e.target.value}))}
+                      style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none", boxSizing:"border-box" }}>
                       {["Телефон","Booking","Beds24","Директна","Уебсайт","Airbnb"].map(s => <option key={s}>{s}</option>)}
                     </select>
                   </div>
                 </div>
                 <div style={{ marginTop:"9px" }}>
                   <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>СПЕЦИАЛНИ ЖЕЛАНИЯ</label>
-                  <textarea value={form.notes} onChange={e => setForm(f => ({...f,notes:e.target.value}))} placeholder="Ранно пристигане, паркинг, детско легло..."
-                    style={{ width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"8px 11px", fontSize:"13px", background:"#faf9f7", color:"#111", resize:"none", height:"52px", outline:"none" }} />
+                  <textarea value={form.notes} onChange={e => setForm((f:any) => ({...f,notes:e.target.value}))} placeholder="Ранно пристигане, паркинг, детско легло..."
+                    style={{ width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"8px 11px", fontSize:"13px", background:"#faf9f7", color:"#111", resize:"none", height:"52px", outline:"none", boxSizing:"border-box" }} />
                 </div>
                 <div style={{ background:"#f5f3ff", border:"1px solid #ddd3fe", borderRadius:"8px", padding:"9px 13px", marginTop:"9px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                  <div style={{ fontSize:"12px", color:"#6c63ff" }}>{nights} нощи</div>
-                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round(form.pricePerNight * nights)}</div>
+                  <div style={{ fontSize:"12px", color:"#6c63ff" }}>
+                    {nights} нощи · {Number(form.guests)||0} възр. · {Number(form.children)||0} деца
+                  </div>
+                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round((Number(form.pricePerNight)||0) * nights)}</div>
                 </div>
-                <div style={{ display:"flex", gap:"7px", marginTop:"11px" }}>
-                  <button onClick={saveRes} style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>💾 Запази резервацията</button>
-                  <button onClick={() => { setModal(false); setVoiceParsed(null); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer" }}>Затвори</button>
+                <div style={{ display:"flex", gap:"7px", marginTop:"11px", flexWrap:"wrap" }}>
+                  <button onClick={saveRes} style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>
+                    {editingRes ? "💾 Запази промените" : "💾 Запази резервацията"}
+                  </button>
+                  {editingRes && (
+                    <button onClick={() => setCancelConfirm(editingRes)} style={{ background:"#fee2e2", color:"#dc2626", border:"1px solid #fca5a5", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer", fontWeight:"600" }}>
+                      Анулирай
+                    </button>
+                  )}
+                  <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer" }}>Затвори</button>
+                </div>
+                {/* Mobile: active reservations shown below buttons */}
+                <div className="modal-mobile-active" style={{ display:"none" }}>
+                  <style dangerouslySetInnerHTML={{__html:`@media(max-width:768px){.modal-mobile-active{display:block!important;margin-top:14px}}`}} />
+                  <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", letterSpacing:".4px", textTransform:"uppercase", marginBottom:"8px", paddingBottom:"6px", borderBottom:"1px solid #eee" }}>Активни резервации за {fmtS(sel)}</div>
+                  {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb" }}>Няма активни.</div>}
+                  {activeToday.map(r => {
+                    const cs = chipStyle(r.source);
+                    return (
+                      <div key={r.id} onClick={() => { setModal(false); setTimeout(() => openEditRes(r), 100); }}
+                        style={{ borderRadius:"9px", padding:"8px 10px", marginBottom:"6px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
+                        <div style={{ fontSize:"12px", fontWeight:"700" }}>{r.guestName}</div>
+                        <div style={{ fontSize:"11px", opacity:.75 }}>Стая {r.roomCode} · {fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}</div>
+                      </div>
+                    );
+                  })}
                 </div>
                 <div style={{ fontSize:"10px", color:"#bbb", marginTop:"7px" }}>Синхронизира се автоматично с Beds24, Booking.com и уебсайта</div>
               </div>
-              <div style={{ padding:"18px 20px", background:"#faf9f7", maxHeight:"580px", overflowY:"auto" }}>
+              {/* Right panel — desktop only */}
+              <div className="modal-right" style={{ padding:"18px 20px", background:"#faf9f7", maxHeight:"650px", overflowY:"auto" }}>
                 <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", letterSpacing:".4px", textTransform:"uppercase", marginBottom:"8px", paddingBottom:"6px", borderBottom:"1px solid #eee" }}>Активни резервации за {fmtS(sel)}</div>
                 {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма активни.</div>}
                 {activeToday.map(r => {
                   const cs = chipStyle(r.source);
                   return (
-                    <div key={r.id} style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx }}>
+                    <div key={r.id} onClick={() => { setModal(false); setTimeout(() => openEditRes(r), 100); }}
+                      style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
                       <div style={{ fontSize:"13px", fontWeight:"700" }}>{r.guestName}</div>
                       <div style={{ fontSize:"11px", opacity:.75, marginTop:"2px" }}>Стая {r.roomCode} · {r.phone}</div>
                       <div style={{ fontSize:"11px", opacity:.65, marginTop:"1px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}</div>
@@ -438,7 +645,93 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {/* VOICE MODAL */}
+      {/* ═══════════ CANCEL CONFIRMATION POPUP ═══════════ */}
+      {cancelConfirm && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200 }}
+          onClick={() => setCancelConfirm(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background:"#fff", borderRadius:"16px", padding:"32px", maxWidth:"460px", width:"90%", textAlign:"center", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
+            <div style={{ fontSize:"48px", marginBottom:"16px" }}>⚠️</div>
+            <div style={{ fontSize:"20px", fontWeight:"700", color:"#111", marginBottom:"12px" }}>
+              Сигурни ли сте, че искате да анулирате тази резервация?
+            </div>
+            <div style={{ fontSize:"14px", color:"#666", marginBottom:"8px" }}>
+              <strong>{cancelConfirm.guestName}</strong> · Стая {cancelConfirm.roomCode}
+            </div>
+            <div style={{ fontSize:"13px", color:"#999", marginBottom:"24px" }}>
+              {fmtS(cancelConfirm.startDate.slice(0,10))} — {fmtS(cancelConfirm.endDate.slice(0,10))} · {cancelConfirm.source}
+            </div>
+            <div style={{ fontSize:"12px", color:"#f59e0b", background:"#fffbeb", border:"1px solid #fcd34d", borderRadius:"8px", padding:"10px", marginBottom:"20px" }}>
+              Резервацията ще бъде анулирана и в Beds24. Можете да я възстановите до 24 часа.
+            </div>
+            <div style={{ display:"flex", gap:"10px", justifyContent:"center" }}>
+              <button onClick={() => doCancel(cancelConfirm.id)}
+                style={{ background:"#dc2626", color:"#fff", border:"none", borderRadius:"10px", padding:"12px 28px", fontSize:"15px", fontWeight:"700", cursor:"pointer" }}>
+                Да, анулирай
+              </button>
+              <button onClick={() => setCancelConfirm(null)}
+                style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"10px", padding:"12px 28px", fontSize:"15px", cursor:"pointer" }}>
+                Не, запази
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ FULL-SCREEN TODAY LIST (mobile) ═══════════ */}
+      {todayFullScreen && (
+        <div style={{ position:"fixed", inset:0, background:"#fff", zIndex:150, display:"flex", flexDirection:"column" }}>
+          <div style={{ background:"#12121c", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+            <span style={{ fontSize:"16px", fontWeight:"700", color:"#fff" }}>
+              {todayFullScreen === "res" ? `Резервации за ${fmtS(sel)}` : `Освобождавания за ${fmtS(sel)}`}
+            </span>
+            <button onClick={() => setTodayFullScreen(null)}
+              style={{ background:"#1e1e2e", color:"#fff", border:"1px solid #2a2a40", borderRadius:"7px", width:"32px", height:"32px", cursor:"pointer", fontSize:"18px" }}>×</button>
+          </div>
+          <div style={{ flex:1, overflowY:"auto", padding:"16px" }}>
+            {todayFullScreen === "res" ? (
+              activeToday.length === 0 ? <div style={{ color:"#bbb", padding:"20px", textAlign:"center" }}>Няма активни резервации.</div> :
+              activeToday.map(r => {
+                const cs = chipStyle(r.source);
+                return (
+                  <div key={r.id} onClick={() => { setTodayFullScreen(null); openEditRes(r); }}
+                    style={{ borderRadius:"12px", padding:"14px 16px", marginBottom:"10px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"8px" }}>
+                      <div style={{ width:"36px", height:"36px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px", fontWeight:"700", color:"#fff" }}>{(r.guestName||"?")[0]}</div>
+                      <div>
+                        <div style={{ fontSize:"16px", fontWeight:"700" }}>{r.guestName}</div>
+                        <div style={{ fontSize:"13px", opacity:.75 }}>Стая {r.roomCode} · Вход {r.room?.entrance || ""}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize:"13px", opacity:.7 }}>{r.phone} · {r.email || ""}</div>
+                    <div style={{ fontSize:"13px", opacity:.7, marginTop:"4px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))} · {r.source}</div>
+                    {r.notes && <div style={{ fontSize:"12px", opacity:.6, marginTop:"4px", fontStyle:"italic" }}>{r.notes}</div>}
+                    <div style={{ display:"flex", gap:"8px", marginTop:"10px" }}>
+                      <span style={{ fontSize:"11px", padding:"3px 8px", borderRadius:"5px", background:cs.bd, color:"#fff" }}>{r.source}</span>
+                      <button onClick={e => { e.stopPropagation(); setCancelConfirm(r); }}
+                        style={{ fontSize:"11px", padding:"3px 8px", borderRadius:"5px", background:"rgba(220,38,38,.1)", border:"1px solid #fca5a5", color:"#dc2626", cursor:"pointer" }}>Анулирай</button>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              coToday.length === 0 ? <div style={{ color:"#bbb", padding:"20px", textAlign:"center" }}>Няма освобождавания.</div> :
+              coToday.map(r => (
+                <div key={r.id} onClick={() => { setTodayFullScreen(null); openEditRes(r); }}
+                  style={{ display:"flex", alignItems:"center", gap:"12px", padding:"14px 16px", background:"#fffbf0", borderRadius:"12px", marginBottom:"10px", borderLeft:"4px solid #f59e0b", cursor:"pointer" }}>
+                  <div style={{ width:"36px", height:"36px", borderRadius:"50%", background:"#fcd34d", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px", fontWeight:"700" }}>{(r.guestName||"?")[0]}</div>
+                  <div>
+                    <div style={{ fontSize:"16px", fontWeight:"700" }}>{r.guestName}</div>
+                    <div style={{ fontSize:"13px", color:"#aaa" }}>Стая {r.roomCode} · {r.phone || ""}</div>
+                    <div style={{ fontSize:"12px", color:"#ccc", marginTop:"2px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}</div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ VOICE MODAL ═══════════ */}
       {voiceOpen && (
         <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.6)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"40px 14px", zIndex:110 }}
           onClick={e => { if (e.currentTarget===e.target) { stopVoice(); setVoiceOpen(false); } }}>
@@ -446,13 +739,13 @@ export default function CalendarPage() {
             <div style={{ background:"#12121c", padding:"15px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
               <div>
                 <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>🎤 Гласово попълване</div>
-                <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>Говорете на български – системата разпознава данните</div>
+                <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>Поддържа Chrome, Safari, Edge · Говорете на български</div>
               </div>
               <button onClick={() => { stopVoice(); setVoiceOpen(false); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
             </div>
             <div style={{ padding:"20px" }}>
               <button onClick={voiceStatus==="listening" ? stopVoice : startVoice}
-                style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none" }}>
+                style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none", WebkitTapHighlightColor:"transparent" }}>
                 {voiceStatus==="listening" ? "🔴" : voiceStatus==="processing" ? "⏳" : "🎤"}
               </button>
               <div style={{ textAlign:"center", fontSize:"13px", color:"#555", marginBottom:"14px", minHeight:"20px" }}>
@@ -460,7 +753,7 @@ export default function CalendarPage() {
               </div>
               {transcript && (
                 <div style={{ background:"#f5f3ef", borderRadius:"8px", padding:"12px", minHeight:"50px", fontSize:"13px", color:"#333", marginBottom:"14px", border:"1px solid #e5e2dc", fontStyle:"italic" }}>
-                  "{transcript}"
+                  &ldquo;{transcript}&rdquo;
                 </div>
               )}
               {voiceParsed && (
@@ -485,15 +778,18 @@ export default function CalendarPage() {
               )}
               <div style={{ display:"flex", gap:"8px" }}>
                 <button onClick={confirmVoice} disabled={!voiceParsed}
-                  style={{ background: voiceParsed ? "#6c63ff" : "#ddd", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor: voiceParsed ? "pointer" : "not-allowed", flex:1 }}>
+                  style={{ background: voiceParsed ? "#6c63ff" : "#ddd", color:"#fff", border:"none", borderRadius:"8px", padding:"12px 18px", fontSize:"14px", fontWeight:"600", cursor: voiceParsed ? "pointer" : "not-allowed", flex:1, WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>
                   ✓ Потвърди и продължи
                 </button>
-                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer" }}>🔄 Опитай пак</button>
+                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px 14px", fontSize:"14px", cursor:"pointer", WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>🔄 Опитай пак</button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* Pulse animation */}
+      <style dangerouslySetInnerHTML={{__html:`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}} />
     </DashboardShell>
   );
 }

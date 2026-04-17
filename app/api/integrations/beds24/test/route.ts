@@ -56,7 +56,26 @@ export async function GET() {
     properties = { error: e?.message };
   }
 
-  // 2. Try fetching bookings without any property filter
+  // 2. Fetch rooms for each property
+  let rooms: any = {};
+  const propIds = Array.isArray(properties?.data)
+    ? properties.data.map((p: any) => p.id)
+    : [];
+  for (const pid of propIds) {
+    try {
+      const r = await fetch(`${BEDS24_BASE}/rooms?propertyId=${pid}`, {
+        method: "GET",
+        headers: { token, accept: "application/json" },
+      });
+      const body = await r.json().catch(() => null);
+      const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+      rooms[pid] = list.map((rm: any) => ({ id: rm.id, name: rm.name, qty: rm.qty }));
+    } catch (e: any) {
+      rooms[pid] = { error: e?.message };
+    }
+  }
+
+  // 3. Try fetching bookings without any property filter
   let bookingsAll: any = null;
   try {
     const r = await fetch(`${BEDS24_BASE}/bookings?departureFrom=2026-04-01&arrivalTo=2026-12-31&includeGuests=true`, {
@@ -85,8 +104,9 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     tokenPresent: !!token,
-    properties,
-    bookingsAll: Array.isArray(bookingsAll) ? { count: bookingsAll.length, sample: bookingsAll.slice(0, 2) } : bookingsAll,
+    properties: Array.isArray(properties?.data) ? properties.data.map((p: any) => ({ id: p.id, name: p.name, address: p.address })) : properties,
+    rooms,
+    bookingsAll: Array.isArray(bookingsAll?.data) ? { count: bookingsAll.data.length, sample: bookingsAll.data.slice(0, 2) } : Array.isArray(bookingsAll) ? { count: bookingsAll.length, sample: bookingsAll.slice(0, 2) } : bookingsAll,
     bookingsByProperty: bookingsByProp,
   });
 }

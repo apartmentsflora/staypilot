@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { DashboardShell } from "@/components/DashboardShell";
 import { supabaseAdmin } from "@/lib/supabase";
 

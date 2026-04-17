@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { BEDS24_MAP, getRoomColor } from "@/lib/rooms";

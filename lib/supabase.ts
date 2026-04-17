@@ -13,16 +13,28 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
  *   the JWT in `sp_session` before touching the DB.
  */
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+// Env vars — read at module scope but validated lazily so the build step
+// (which has no env vars) can still compile and collect page data.
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!url) throw new Error("Missing env var: NEXT_PUBLIC_SUPABASE_URL");
-if (!anonKey) throw new Error("Missing env var: NEXT_PUBLIC_SUPABASE_ANON_KEY");
+// Browser-safe client — lazy singleton so it doesn't throw during build.
+function makeAnon(): SupabaseClient {
+  if (!url) throw new Error("Missing env var: NEXT_PUBLIC_SUPABASE_URL");
+  if (!anonKey) throw new Error("Missing env var: NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  return createClient(url, anonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
 
-// Browser-safe client.
-export const supabase: SupabaseClient = createClient(url, anonKey, {
-  auth: { autoRefreshToken: false, persistSession: false },
+export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_t, prop) {
+    const g = globalThis as any;
+    const client: SupabaseClient = g.__spAnon ?? (g.__spAnon = makeAnon());
+    const value = (client as any)[prop];
+    return typeof value === "function" ? value.bind(client) : value;
+  },
 });
 
 // Server-only client. Throws at first use if the service_role key is missing,

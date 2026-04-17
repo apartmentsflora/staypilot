@@ -61,8 +61,13 @@ export async function POST(req: Request) {
     }
 
     const externalRef = `beds24-${b.id}`;
-    const guestName = (b.firstName || b.guestFirstName || "")
-      + (b.lastName ? ` ${b.lastName}` : b.guestLastName ? ` ${b.guestLastName}` : "");
+    // Guest info may be top-level OR nested inside guests[] when includeGuests=true
+    const guest = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
+    const firstName = guest.firstName || b.firstName || b.guestFirstName || "";
+    const lastName = guest.lastName || b.lastName || b.guestLastName || "";
+    const guestName = (firstName + (lastName ? ` ${lastName}` : ""));
+    const phone = guest.phone || b.phone || "";
+    const email = guest.email || b.email || null;
     const isCancelled = b.status === "cancelled" || b.status === "black";
 
     const { data: existing } = await supabaseAdmin
@@ -82,8 +87,8 @@ export async function POST(req: Request) {
     if (existing) {
       await supabaseAdmin.from("Reservation").update({
         guestName: guestName.trim() || "Beds24 гост",
-        phone: b.phone || "",
-        email: b.email || null,
+        phone: phone || "",
+        email: email || null,
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
         endDate: end.toISOString(),
@@ -95,8 +100,8 @@ export async function POST(req: Request) {
     } else {
       await supabaseAdmin.from("Reservation").insert({
         guestName: guestName.trim() || "Beds24 гост",
-        phone: b.phone || "",
-        email: b.email || null,
+        phone: phone || "",
+        email: email || null,
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
         endDate: end.toISOString(),

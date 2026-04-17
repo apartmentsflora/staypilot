@@ -62,8 +62,14 @@ export default function SettingsPage() {
             {beds24Connected ? "BEDS24 СВЪРЗАН" : "BEDS24 INVITE CODE"}
           </label>
           {beds24Connected ? (
-            <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", color:"#15803d" }}>
-              ✓ Beds24 е свързан и токенът е валиден. Може да импортираш резервации по-долу.
+            <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+              <div style={{ flex:1, background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", color:"#15803d" }}>
+                ✓ Beds24 е свързан. Може да импортираш резервации по-долу.
+              </div>
+              <button onClick={() => { setBeds24Connected(false); setBeds24Key(""); setSetupMsg(null); }}
+                style={{ background:"#f5f3ef", color:"#555", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 14px", height:"36px", fontSize:"12px", cursor:"pointer", whiteSpace:"nowrap" }}>
+                Свържи отново
+              </button>
             </div>
           ) : (
             <>
@@ -102,7 +108,7 @@ export default function SettingsPage() {
                 </div>
               )}
               <div style={{ marginTop:"10px", fontSize:"11px", color:"#888" }}>
-                Beds24 → Settings → Account → API → Invite Codes → Generate new invite code → постави го тук
+                Beds24 → Settings → MARKETPLACE → API → Generate new invite code → постави го тук
               </div>
             </>
           )}

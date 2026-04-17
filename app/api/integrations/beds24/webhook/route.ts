@@ -51,9 +51,15 @@ export async function POST(req: Request) {
   const { data: existing } = await supabaseAdmin
     .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
 
-  const guestName = payload.firstName
-    ? `${payload.firstName} ${payload.lastName || ""}`.trim()
+  // Guest info may be top-level or nested in guests[] depending on webhook config
+  const guest0 = Array.isArray(payload.guests) && payload.guests.length > 0 ? payload.guests[0] : {};
+  const gFirstName = guest0.firstName || payload.firstName || "";
+  const gLastName = guest0.lastName || payload.lastName || "";
+  const guestName = gFirstName
+    ? `${gFirstName} ${gLastName}`.trim()
     : (payload.guestName || "Beds24 гост");
+  const gPhone = guest0.phone || payload.phone || "";
+  const gEmail = guest0.email || payload.email || null;
 
   try {
     if (payload.status === "cancelled" && existing) {
@@ -67,8 +73,8 @@ export async function POST(req: Request) {
       // Treat the Beds24 payload as authoritative for anything it provides.
       const patch: Record<string, any> = {
         guestName,
-        phone: payload.phone || "",
-        email: payload.email || null,
+        phone: gPhone,
+        email: gEmail,
         startDate: start.toISOString(),
         endDate: end.toISOString(),
         notes: payload.notes || null,
@@ -85,8 +91,8 @@ export async function POST(req: Request) {
     } else if (!existing && payload.status !== "cancelled") {
       await supabaseAdmin.from("Reservation").insert({
         guestName,
-        phone: payload.phone || "",
-        email: payload.email || null,
+        phone: gPhone,
+        email: gEmail,
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
         endDate: end.toISOString(),

@@ -312,7 +312,10 @@ export async function fetchBeds24Bookings(from: string, to: string): Promise<any
     for (const pid of propertyIds) {
       const url = new URL(`${BEDS24_BASE}/bookings`);
       url.searchParams.set("propertyId", String(pid));
-      url.searchParams.set("arrivalFrom", from);
+      // Use departureFrom + arrivalTo to capture all bookings overlapping
+      // the [from, to] window — not just those arriving within it.
+      // This catches guests who arrived before `from` but depart after it.
+      url.searchParams.set("departureFrom", from);
       url.searchParams.set("arrivalTo", to);
       url.searchParams.set("includeInvoiceItems", "false");
       url.searchParams.set("includeGuests", "true");

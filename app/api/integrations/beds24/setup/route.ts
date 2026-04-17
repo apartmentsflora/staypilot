@@ -6,11 +6,13 @@ import { supabaseAdmin } from "@/lib/supabase";
 
 /**
  * POST /api/integrations/beds24/setup
- * Body: { "inviteCode": "<code from Beds24 dashboard>" }
+ * Body: { "inviteCode": "<code from Beds24 SETTINGS → MARKETPLACE → API>" }
  *
- * Exchanges a Beds24 v2 invite code for a refresh token via
- * POST https://beds24.com/api/v2/authentication/setup
- * then stores the refresh token in IntegrationCredential.
+ * Beds24 v2 setup flow:
+ *   1. GET /authentication/setup  (header: code) → { token, refreshToken, expiresIn }
+ *   2. Store refreshToken + token (access) in IntegrationCredential
+ *
+ * The setup endpoint is GET (not POST) per Beds24 API docs.
  */
 export async function POST(req: Request) {
   const session = await getSession();
@@ -26,12 +28,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing inviteCode" }, { status: 400 });
   }
 
-  // Step 1: exchange invite code → refresh token
+  // Step 1: exchange invite code → token + refreshToken
+  // Beds24 v2 docs: GET /authentication/setup with header "code"
   let setupResp: any;
   try {
     const r = await fetch("https://beds24.com/api/v2/authentication/setup", {
-      method: "POST",
-      headers: { code: inviteCode, accept: "application/json" },
+      method: "GET",
+      headers: { code: inviteCode.trim(), accept: "application/json" },
     });
     const text = await r.text();
     try { setupResp = JSON.parse(text); } catch { setupResp = { raw: text }; }
@@ -51,7 +54,11 @@ export async function POST(req: Request) {
     }, { status: 502 });
   }
 
-  const refreshToken = setupResp?.token;
+  // The setup response returns both an access token and a refresh token
+  const accessToken = setupResp?.token ?? null;
+  const refreshToken = setupResp?.refreshToken ?? null;
+  const expiresIn = typeof setupResp?.expiresIn === "number" ? setupResp.expiresIn : 82800;
+
   if (!refreshToken) {
     return NextResponse.json({
       ok: false,
@@ -60,27 +67,14 @@ export async function POST(req: Request) {
     }, { status: 502 });
   }
 
-  // Step 2: verify the refresh token by exchanging it for an access token
-  let accessToken: string | null = null;
-  let expiresAt: string | null = null;
-  try {
-    const r2 = await fetch("https://beds24.com/api/v2/authentication/token", {
-      method: "GET",
-      headers: { refreshToken, accept: "application/json" },
-    });
-    if (r2.ok) {
-      const tok = await r2.json();
-      accessToken = tok?.token ?? null;
-      const expiresIn = typeof tok?.expiresIn === "number" ? tok.expiresIn : 82800;
-      expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-    }
-  } catch { /* access token exchange is best-effort here */ }
-
-  // Step 3: store in DB
-  const values: any = { refreshToken, apiKey: refreshToken };
+  // Step 2: store in DB
+  const values: any = {
+    refreshToken,
+    apiKey: refreshToken, // legacy alias used by beds24.ts
+  };
   if (accessToken) {
     values.accessToken = accessToken;
-    values.accessTokenExpiresAt = expiresAt;
+    values.accessTokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   }
 
   const { error } = await supabaseAdmin

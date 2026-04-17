@@ -106,7 +106,7 @@ export async function POST(req: Request) {
     await supabaseAdmin.from("SyncEvent").insert({
       provider: (source || "direct").toLowerCase(),
       direction: "INBOUND",
-      status: "SUCCESS",
+      status: "PROCESSED",
       payload: { reservationId: data.id, roomCode, guestName },
     });
   } catch (e) {

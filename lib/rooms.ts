@@ -23,27 +23,28 @@ export function getRoomColor(code: string) {
   return ROOM_COLORS[code] || "bg-slate-50 border-slate-300";
 }
 
+import { supabaseAdmin } from "@/lib/supabase";
+
 // Beds24 propertyId:roomId → internal room code
-export const BEDS24_MAP: Record<string, string> = {
-  "320506:666862": "39.0.1",
-  "320506:666858": "1.3",
-  "320506:666864": "1.3A",
-  "320506:666865": "1.5",
-  "320506:666857": "2.4.1",
-  "320506:666863": "2.4.2",
-  "320506:666859": "2.4.3",
-  "320506:666860": "2.5",
-  "320506:666861": "5.5",
-  "320505:666856": "41.0.1",
-  "320505:666854": "41.0.2",
-  "320505:666853": "1.1",
-  "320505:666855": "1.2",
-  "320505:666849": "2.2",
-  "320505:666850": "41-2",
-  "320505:666848": "3.1",
-  "320505:666852": "4.1",
-  "320505:666851": "4.2",
-};
+// Static fallback — prefer loadBeds24Map() which reads from the Room table.
+export const BEDS24_MAP: Record<string, string> = {};
+
+/** Build the "propertyId:roomId" → roomCode map from the Room table at runtime. */
+export async function loadBeds24Map(): Promise<Record<string, string>> {
+  try {
+    const { data: rooms } = await supabaseAdmin
+      .from("Room").select("code, beds24PropertyId, beds24RoomId");
+    const map: Record<string, string> = {};
+    for (const r of (rooms || [])) {
+      if (r.beds24PropertyId && r.beds24RoomId) {
+        map[`${r.beds24PropertyId}:${r.beds24RoomId}`] = r.code;
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
 
 // Booking hotelId:roomId → internal room code
 export const BOOKING_MAP: Record<string, string> = {

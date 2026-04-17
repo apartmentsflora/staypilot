@@ -89,7 +89,7 @@ export async function GET() {
 
   // 3. Try fetching bookings for each hardcoded property
   const bookingsByProp: Record<string, any> = {};
-  for (const pid of [320505, 320506]) {
+  for (const pid of [322955, 322959]) {
     try {
       const r = await fetch(`${BEDS24_BASE}/bookings?propertyId=${pid}&departureFrom=2026-04-01&arrivalTo=2026-12-31`, {
         method: "GET",

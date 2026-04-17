@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { BEDS24_MAP, getRoomColor } from "@/lib/rooms";
+import { BEDS24_MAP, loadBeds24Map, getRoomColor } from "@/lib/rooms";
 
 // Beds24 → StayPilot webhook. Public (no session) because Beds24 servers
 // call it, but optionally authenticated with a shared secret stored in
@@ -28,9 +28,10 @@ export async function POST(req: Request) {
     });
   } catch (e) { console.error("[beds24 webhook] log received failed", e); }
 
+  const dynamicMap = await loadBeds24Map();
   const key = payload?.propertyId && payload?.roomId
     ? `${payload.propertyId}:${payload.roomId}` : null;
-  const roomCode = key ? BEDS24_MAP[key] : null;
+  const roomCode = key ? (dynamicMap[key] || BEDS24_MAP[key]) : null;
   if (!roomCode) return NextResponse.json({ ok: true, mapped: false });
 
   const { data: room } = await supabaseAdmin.from("Room").select("id").eq("code", roomCode).maybeSingle();

@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { BEDS24_MAP, getRoomColor } from "@/lib/rooms";
+import { BEDS24_MAP, loadBeds24Map, getRoomColor } from "@/lib/rooms";
 import { fetchBeds24Bookings } from "@/lib/beds24";
 
 // Bootstrap / reconcile endpoint.
@@ -38,13 +38,20 @@ export async function POST(req: Request) {
   }
 
   let inserted = 0, updated = 0, cancelled = 0, skipped = 0;
+  const unmappedKeys: string[] = [];
+  const dynamicMap = await loadBeds24Map();
 
   for (const b of bookings) {
     const propertyId = Number(b.propertyId ?? b.property_id);
     const roomId = Number(b.roomId ?? b.room_id);
     const key = propertyId && roomId ? `${propertyId}:${roomId}` : null;
-    const roomCode = key ? BEDS24_MAP[key] : null;
-    if (!roomCode) { skipped++; continue; }
+    const roomCode = key ? (dynamicMap[key] || BEDS24_MAP[key]) : null;
+    if (!roomCode) {
+      skipped++;
+      if (key && !unmappedKeys.includes(key)) unmappedKeys.push(key);
+      console.warn(`[beds24 import] no room mapping for key=${key} (booking ${b.id})`);
+      continue;
+    }
 
     const { data: room } = await supabaseAdmin
       .from("Room").select("id").eq("code", roomCode).maybeSingle();
@@ -127,5 +134,8 @@ export async function POST(req: Request) {
     });
   } catch { /* never cascade logging failures */ }
 
-  return NextResponse.json({ ok: true, inserted, updated, cancelled, skipped, total: bookings.length });
+  return NextResponse.json({
+    ok: true, inserted, updated, cancelled, skipped, total: bookings.length,
+    ...(unmappedKeys.length > 0 ? { unmappedKeys } : {}),
+  });
 }

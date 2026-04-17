@@ -54,7 +54,7 @@ export default function SettingsPage() {
             <div style={{ width:"36px", height:"36px", borderRadius:"8px", background:"#e0f2fe", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:"700", fontSize:"12px", color:"#0369a1" }}>B24</div>
             <div>
               <div style={{ fontSize:"14px", fontWeight:"700" }}>Beds24</div>
-              <div style={{ fontSize:"11px", color:"#888" }}>Property IDs: 320505 · 320506 · 18 стаи</div>
+              <div style={{ fontSize:"11px", color:"#888" }}>Property IDs: 322955 · 322959 · 18 стаи</div>
             </div>
             <div style={{ marginLeft:"auto", fontSize:"11px", color:"#16a34a", fontWeight:"600" }}>● Конфигуриран</div>
           </div>

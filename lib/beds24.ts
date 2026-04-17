@@ -20,26 +20,28 @@ const BEDS24_BASE = "https://beds24.com/api/v2";
 // Forward map: internal room code → Beds24 roomId.
 // Derived from lib/rooms.ts BEDS24_MAP (propertyId:roomId → code).
 // Kept here to avoid a circular import.
-export const CODE_TO_BEDS24_ROOM: Record<string, { propertyId: number; roomId: number }> = {
-  "39.0.1": { propertyId: 320506, roomId: 666862 },
-  "1.3":    { propertyId: 320506, roomId: 666858 },
-  "1.3A":   { propertyId: 320506, roomId: 666864 },
-  "1.5":    { propertyId: 320506, roomId: 666865 },
-  "2.4.1":  { propertyId: 320506, roomId: 666857 },
-  "2.4.2":  { propertyId: 320506, roomId: 666863 },
-  "2.4.3":  { propertyId: 320506, roomId: 666859 },
-  "2.5":    { propertyId: 320506, roomId: 666860 },
-  "5.5":    { propertyId: 320506, roomId: 666861 },
-  "41.0.1": { propertyId: 320505, roomId: 666856 },
-  "41.0.2": { propertyId: 320505, roomId: 666854 },
-  "1.1":    { propertyId: 320505, roomId: 666853 },
-  "1.2":    { propertyId: 320505, roomId: 666855 },
-  "2.2":    { propertyId: 320505, roomId: 666849 },
-  "41-2":   { propertyId: 320505, roomId: 666850 },
-  "3.1":    { propertyId: 320505, roomId: 666848 },
-  "4.1":    { propertyId: 320505, roomId: 666852 },
-  "4.2":    { propertyId: 320505, roomId: 666851 },
-};
+// Built dynamically at runtime from the Room table. The static fallback
+// below uses property IDs only (room IDs are placeholders until the room
+// discovery endpoint populates the Room table with real Beds24 IDs).
+// At runtime, prefer loadBeds24RoomMap() which reads the DB.
+export const CODE_TO_BEDS24_ROOM: Record<string, { propertyId: number; roomId: number }> = {};
+
+/** Load the roomCode → {propertyId, roomId} map from the Room table. */
+export async function loadBeds24RoomMap(): Promise<Record<string, { propertyId: number; roomId: number }>> {
+  try {
+    const { data: rooms } = await supabaseAdmin
+      .from("Room").select("code, beds24PropertyId, beds24RoomId");
+    const map: Record<string, { propertyId: number; roomId: number }> = {};
+    for (const r of (rooms || [])) {
+      if (r.beds24PropertyId && r.beds24RoomId) {
+        map[r.code] = { propertyId: r.beds24PropertyId, roomId: r.beds24RoomId };
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
 
 type CredValues = {
   refreshToken?: string;
@@ -198,7 +200,8 @@ export async function createBeds24Booking(input: {
   if (input.externalRef && input.externalRef.startsWith("beds24-")) {
     return { ok: false, reason: "skipped — reservation originated from Beds24" };
   }
-  const map = CODE_TO_BEDS24_ROOM[input.roomCode];
+  const dynamicMap = await loadBeds24RoomMap();
+  const map = dynamicMap[input.roomCode] || CODE_TO_BEDS24_ROOM[input.roomCode];
   if (!map) return { ok: false, reason: `no Beds24 mapping for room ${input.roomCode}` };
 
   const { firstName, lastName } = splitName(input.guestName);
@@ -306,7 +309,7 @@ export async function fetchBeds24Bookings(from: string, to: string): Promise<any
   const token = await getAccessToken();
   if (!token) return null;
 
-  const propertyIds = [320505, 320506];
+  const propertyIds = [322955, 322959];
   const all: any[] = [];
   try {
     for (const pid of propertyIds) {

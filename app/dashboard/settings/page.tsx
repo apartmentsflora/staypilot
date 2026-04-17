@@ -11,11 +11,17 @@ export default function SettingsPage() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ inserted: number; updated: number; cancelled: number; skipped: number; total: number } | null>(null);
   const [importError, setImportError] = useState("");
+  const [beds24Connected, setBeds24Connected] = useState(false);
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     setAppUrl(window.location.origin);
     fetch("/api/integrations/settings").then(r => r.json()).then(d => {
-      if (d.beds24?.apiKey) setBeds24Key(d.beds24.apiKey);
+      if (d.beds24?.refreshToken || d.beds24?.apiKey) {
+        setBeds24Key(d.beds24.refreshToken || d.beds24.apiKey);
+        setBeds24Connected(true);
+      }
       if (d.website?.url) setWebsiteUrl(d.website.url);
       if (d.website?.apiKey) setWebhookKey(d.website.apiKey);
     });
@@ -52,18 +58,54 @@ export default function SettingsPage() {
             </div>
             <div style={{ marginLeft:"auto", fontSize:"11px", color:"#16a34a", fontWeight:"600" }}>● Конфигуриран</div>
           </div>
-          <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>BEDS24 API KEY</label>
-          <div style={{ display:"flex", gap:"8px" }}>
-            <input value={beds24Key} onChange={e => setBeds24Key(e.target.value)} placeholder="Въведи Beds24 API ключ..."
-              style={{ flex:1, height:"36px", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 12px", fontSize:"13px", background:"#faf9f7", outline:"none" }} />
-            <button onClick={() => save("beds24", { apiKey: beds24Key })}
-              style={{ background: saved==="beds24" ? "#16a34a" : "#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"0 16px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>
-              {saved==="beds24" ? "✓ Запазено" : "Запази"}
-            </button>
-          </div>
-          <div style={{ marginTop:"10px", fontSize:"11px", color:"#888" }}>
-            Намери API ключа в: Beds24 → Settings → Account → API Keys
-          </div>
+          <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>
+            {beds24Connected ? "BEDS24 СВЪРЗАН" : "BEDS24 INVITE CODE"}
+          </label>
+          {beds24Connected ? (
+            <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"8px", padding:"10px 14px", fontSize:"12px", color:"#15803d" }}>
+              ✓ Beds24 е свързан и токенът е валиден. Може да импортираш резервации по-долу.
+            </div>
+          ) : (
+            <>
+              <div style={{ display:"flex", gap:"8px" }}>
+                <input value={beds24Key} onChange={e => setBeds24Key(e.target.value)} placeholder="Постави invite code от Beds24..."
+                  style={{ flex:1, height:"36px", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 12px", fontSize:"13px", background:"#faf9f7", outline:"none" }} />
+                <button
+                  disabled={setupLoading || !beds24Key.trim()}
+                  onClick={async () => {
+                    setSetupLoading(true); setSetupMsg(null);
+                    try {
+                      const r = await fetch("/api/integrations/beds24/setup", {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ inviteCode: beds24Key.trim() }),
+                      });
+                      const d = await r.json();
+                      if (d.ok) {
+                        setSetupMsg({ ok: true, text: d.message || "Свързан!" });
+                        setBeds24Connected(true);
+                      } else {
+                        setSetupMsg({ ok: false, text: d.error + (d.detail ? ` — ${JSON.stringify(d.detail)}` : "") });
+                      }
+                    } catch (e: any) { setSetupMsg({ ok: false, text: e.message || "Грешка" }); }
+                    setSetupLoading(false);
+                  }}
+                  style={{
+                    background: setupLoading ? "#d1d5db" : "#6c63ff", color:"#fff", border:"none", borderRadius:"8px",
+                    padding:"0 16px", fontSize:"13px", fontWeight:"600", cursor: setupLoading ? "not-allowed" : "pointer"
+                  }}>
+                  {setupLoading ? "Свързване..." : "Свържи"}
+                </button>
+              </div>
+              {setupMsg && (
+                <div style={{ marginTop:"8px", fontSize:"11px", color: setupMsg.ok ? "#16a34a" : "#dc2626", fontWeight:"500" }}>
+                  {setupMsg.ok ? "✓" : "✗"} {setupMsg.text}
+                </div>
+              )}
+              <div style={{ marginTop:"10px", fontSize:"11px", color:"#888" }}>
+                Beds24 → Settings → Account → API → Invite Codes → Generate new invite code → постави го тук
+              </div>
+            </>
+          )}
 
           {/* Bootstrap import */}
           <div style={{ marginTop:"14px", borderTop:"1px solid #e5e2dc", paddingTop:"14px" }}>

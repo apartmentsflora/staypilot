@@ -26,8 +26,16 @@ export async function POST(req: Request) {
     }
 
     // Forward to OpenAI Whisper API
+    // CRITICAL: iOS Safari produces audio/mp4 (AAC in MP4 container).
+    // Whisper truncates transcriptions with .mp4 extension — must use .m4a.
+    // The client should already send the correct filename, but we enforce it here too.
+    let fname = audioFile.name || "recording.webm";
+    if ((audioFile.type || fname).includes("mp4")) {
+      fname = fname.replace(/\.mp4$/, ".m4a");
+      if (!fname.endsWith(".m4a")) fname = "recording.m4a";
+    }
     const whisperForm = new FormData();
-    whisperForm.append("file", audioFile, "recording.webm");
+    whisperForm.append("file", audioFile, fname);
     whisperForm.append("model", "whisper-1");
     whisperForm.append("language", "bg");
     whisperForm.append("response_format", "json");

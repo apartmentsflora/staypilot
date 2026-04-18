@@ -6,22 +6,29 @@ import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 
 // Beds24 → StayPilot webhook.
 //
-// CRITICAL: Beds24 inventory webhooks have a short timeout (~5s). Our handler
-// MUST return 200 OK immediately and process the sync in the background.
-// If we block on the Beds24 API fetch + DB upserts, Beds24 considers the
-// webhook failed and stops sending subsequent notifications.
+// Beds24 has TWO separate webhook systems. We handle both:
 //
-// Beds24 sends TWO types of webhook payload:
+// ┌─────────────────────────────────────────────────────────────────────┐
+// │ 1. INVENTORY WEBHOOK (SYNC_ROOM)                                   │
+// │    Config: Settings > Marketplace > Webhooks                       │
+// │    Payload: {"roomId","propId","ownerId","action":"SYNC_ROOM"}     │
+// │    Minimal — requires API call to fetch booking details.           │
+// │    Triggered by: bookings, date changes, cancellations, inventory  │
+// │    changes, price changes. NOT by restriction changes.             │
+// │    Our strategy: return 200 immediately, process in background.    │
+// ├─────────────────────────────────────────────────────────────────────┤
+// │ 2. BOOKING WEBHOOK (API V2)                                        │
+// │    Config: Settings > Properties > Access > Booking webhooks       │
+// │    Payload: full booking object (id, propertyId, roomId, arrival,  │
+// │             departure, firstName, lastName, status, numAdult, ...) │
+// │    No API call needed — process inline from payload.               │
+// │    This is the FAST path — preferred over inventory webhooks.      │
+// └─────────────────────────────────────────────────────────────────────┘
 //
-// 1. **Inventory webhook** (SYNC_ROOM) — fired on new bookings, modifications,
-//    cancellations, and availability/price changes. Payload is minimal:
-//      {"roomId":"671001","propId":"322955","ownerId":"...","action":"SYNC_ROOM"}
-//    We respond immediately with 200, then fetch the latest bookings for that
-//    room from the Beds24 API and upsert them into our database in the background.
-//
-// 2. **Legacy full-payload webhook** (for backward compat) — contains full booking
-//    details: bookingId, arrival, departure, firstName, lastName, etc.
-//    Processed inline without an API call (fast enough to respond in time).
+// Beds24 webhook behavior (from docs):
+//   - Expects HTTP 200-299; retries over 30 minutes if not received
+//   - Webhooks are async: average delay of ~1 minute (NOT instant)
+//   - Inventory webhooks are NOT triggered by restriction changes
 //
 // Public endpoint (no session) because Beds24 servers call it directly.
 // Optionally authenticated with a shared secret.
@@ -49,24 +56,124 @@ export async function POST(req: Request) {
     });
   } catch (e) { console.error("[beds24 webhook] log received failed", e); }
 
-  // ── Detect SYNC_ROOM inventory webhook ──────────────────────────────────
+  // ── Route 1: SYNC_ROOM inventory webhook ───────────────────────────────
+  // Minimal payload — return 200 immediately, process in background.
   if (payload?.action === "SYNC_ROOM") {
-    // Fire background processing — DO NOT await.
-    // Return 200 immediately so Beds24 doesn't time out.
     processSyncRoom(payload).catch((e) =>
       console.error("[beds24 webhook] background SYNC_ROOM failed", e)
     );
     return NextResponse.json({ ok: true, action: "SYNC_ROOM", accepted: true });
   }
 
-  // ── Legacy full-payload webhook (backward compat) ───────────────────────
-  return handleFullPayload(payload);
+  // ── Route 2: Booking webhook (v2 full payload) ─────────────────────────
+  // Full booking data — process inline (fast, no API call needed).
+  return handleBookingWebhook(payload);
+}
+
+// ── Booking Webhook handler (v2 full payload) ────────────────────────────
+// Beds24 v2 booking webhooks send the full booking object with fields:
+//   id, propertyId, roomId, status, arrival, departure, firstName, lastName,
+//   numAdult, numChild, email, phone, notes, etc.
+// No API call needed — we can upsert directly from the payload.
+async function handleBookingWebhook(payload: any) {
+  const dynamicMap = await loadBeds24Map();
+
+  // Beds24 v2 uses "id", legacy uses "bookingId" — accept both
+  const bookingId = payload?.id || payload?.bookingId;
+  // Beds24 v2 uses "propertyId", legacy inventory uses "propId" — accept both
+  const propertyId = payload?.propertyId || payload?.propId;
+  const payloadRoomId = payload?.roomId;
+
+  const key = propertyId && payloadRoomId
+    ? `${propertyId}:${payloadRoomId}` : null;
+  const roomCode = key ? (dynamicMap[key] || null) : null;
+  if (!roomCode) return NextResponse.json({ ok: true, mapped: false });
+
+  const { data: room } = await supabaseAdmin
+    .from("Room").select("id").eq("code", roomCode).maybeSingle();
+  if (!room) return NextResponse.json({ ok: true, mapped: false });
+
+  const arrival = payload.arrival ?? payload.checkin;
+  const departure = payload.departure ?? payload.checkout;
+  if (!bookingId || !arrival || !departure) {
+    return NextResponse.json({
+      ok: true, mapped: true, applied: false,
+      reason: "missing id/arrival/departure",
+    });
+  }
+
+  const start = new Date(arrival.length <= 10 ? arrival + "T00:00:00Z" : arrival);
+  const end = new Date(departure.length <= 10 ? departure + "T00:00:00Z" : departure);
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
+    return NextResponse.json({ ok: true, mapped: true, applied: false, reason: "invalid dates" });
+  }
+
+  const externalRef = `beds24-${bookingId}`;
+  const { data: existing } = await supabaseAdmin
+    .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
+
+  // Guest info: may be in guests[] array (when includeGuests=true) or top-level
+  const guest0 = Array.isArray(payload.guests) && payload.guests.length > 0
+    ? payload.guests[0] : {};
+  const gFirstName = guest0.firstName || payload.firstName || "";
+  const gLastName = guest0.lastName || payload.lastName || "";
+  const guestName = gFirstName
+    ? `${gFirstName} ${gLastName}`.trim()
+    : (payload.guestName || "Beds24 гост");
+  const gPhone = guest0.phone || payload.phone || "";
+  const gEmail = guest0.email || payload.email || null;
+  const numAdult = Number(payload.numAdult || guest0.numAdult) || 1;
+  const numChild = Number(payload.numChild || guest0.numChild) || 0;
+  const isCancelled = payload.status === "cancelled" || payload.status === "black";
+
+  try {
+    if (isCancelled && existing) {
+      await supabaseAdmin.from("Reservation")
+        .update({ status: "CANCELLED" }).eq("id", existing.id);
+      await supabaseAdmin.from("Notification").insert({
+        type: "CANCEL", title: `Beds24 · Анулиране · ${roomCode}`,
+        detail: `Резервация #${bookingId} анулирана`,
+      });
+    } else if (existing && !isCancelled) {
+      await supabaseAdmin.from("Reservation").update({
+        guestName, phone: gPhone, email: gEmail,
+        startDate: start.toISOString(), endDate: end.toISOString(),
+        notes: payload.notes || null, status: "CONFIRMED",
+        roomCode, roomId: room.id, color: getRoomColor(roomCode),
+        guests: numAdult, children: numChild,
+      }).eq("id", existing.id);
+      await supabaseAdmin.from("Notification").insert({
+        type: "SYSTEM", title: `Beds24 · Промяна · ${roomCode}`,
+        detail: `${guestName} · ${arrival} – ${departure}`,
+      });
+    } else if (!existing && !isCancelled) {
+      await supabaseAdmin.from("Reservation").upsert({
+        guestName, phone: gPhone, email: gEmail,
+        roomCode, roomId: room.id,
+        startDate: start.toISOString(), endDate: end.toISOString(),
+        source: "Beds24", notes: payload.notes || null,
+        status: "CONFIRMED", color: getRoomColor(roomCode), externalRef,
+        guests: numAdult, children: numChild,
+      }, { onConflict: "externalRef" });
+      await supabaseAdmin.from("Notification").insert({
+        type: "NEW", title: `Beds24 · Нова резервация · ${roomCode}`,
+        detail: `${guestName} · ${arrival} – ${departure}`,
+      });
+    }
+    await logSync("PROCESSED", { roomCode, bookingId, via: "booking-webhook" });
+  } catch (e: any) {
+    console.error("[beds24 webhook] booking-webhook apply failed", e);
+    await logSync("ERROR", { error: String(e?.message || e), bookingId });
+    return NextResponse.json({ ok: false, error: "apply failed" }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, mappedRoomCode: roomCode, bookingId });
 }
 
 // ── Background SYNC_ROOM processor ───────────────────────────────────────
-// Runs AFTER the 200 response is sent. Fetches bookings from Beds24 API for
-// ONLY the specific property that triggered the webhook (not both), then
-// upserts matching bookings into the database.
+// Runs AFTER the 200 response is already sent. Fetches bookings from the
+// Beds24 API for ONLY the specific property that triggered the webhook
+// (not both), then upserts matching bookings into the database.
 async function processSyncRoom(payload: any) {
   const propId = Number(payload.propId || payload.propertyId);
   const roomId = Number(payload.roomId);
@@ -76,7 +183,6 @@ async function processSyncRoom(payload: any) {
     return;
   }
 
-  // Map to internal room code
   const dynamicMap = await loadBeds24Map();
   const key = `${propId}:${roomId}`;
   const roomCode = dynamicMap[key] || null;
@@ -92,7 +198,6 @@ async function processSyncRoom(payload: any) {
     return;
   }
 
-  // Fetch bookings for ONLY this property (not both) — much faster.
   const today = new Date().toISOString().slice(0, 10);
   const future = new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 10);
 
@@ -119,8 +224,8 @@ async function processSyncRoom(payload: any) {
       const departure = b.departure ?? b.checkout;
       if (!b.id || !arrival || !departure) continue;
 
-      const start = new Date(arrival);
-      const end = new Date(departure);
+      const start = new Date(arrival.length <= 10 ? arrival + "T00:00:00Z" : arrival);
+      const end = new Date(departure.length <= 10 ? departure + "T00:00:00Z" : departure);
       if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) continue;
 
       const externalRef = `beds24-${b.id}`;
@@ -184,7 +289,7 @@ async function processSyncRoom(payload: any) {
   }
 
   await logSync("PROCESSED", {
-    action: "SYNC_ROOM", roomCode, key,
+    action: "SYNC_ROOM", roomCode, key, via: "inventory-webhook",
     found: roomBookings.length, inserted, updated, cancelled, errors,
   });
 }
@@ -193,7 +298,6 @@ async function processSyncRoom(payload: any) {
 // Unlike fetchBeds24Bookings() in lib/beds24.ts (which fetches both properties),
 // this only queries the one property that triggered the webhook — ~2x faster.
 async function fetchPropertyBookings(propertyId: number, from: string, to: string): Promise<any[]> {
-  // Get access token
   const { data: cred } = await supabaseAdmin
     .from("IntegrationCredential").select("values").eq("provider", "beds24").maybeSingle();
   const vals = cred?.values as any;
@@ -201,7 +305,6 @@ async function fetchPropertyBookings(propertyId: number, from: string, to: strin
   if (!refresh) throw new Error("no Beds24 credential");
 
   let token = vals?.accessToken;
-  // Check if cached token is still valid (5-min margin)
   if (token && vals?.accessTokenExpiresAt) {
     const exp = new Date(vals.accessTokenExpiresAt).getTime();
     if (exp - Date.now() < 5 * 60_000) token = null;
@@ -215,7 +318,6 @@ async function fetchPropertyBookings(propertyId: number, from: string, to: strin
     const body = await r.json();
     token = body.token;
     if (!token) throw new Error("no token in response");
-    // Cache the new token
     const expiresIn = typeof body.expiresIn === "number" ? body.expiresIn : 82800;
     try {
       await supabaseAdmin.from("IntegrationCredential").upsert({
@@ -240,83 +342,6 @@ async function fetchPropertyBookings(propertyId: number, from: string, to: strin
   if (!r.ok) throw new Error(`bookings fetch failed: ${r.status}`);
   const body = await r.json().catch(() => null);
   return Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : [];
-}
-
-// ── Legacy full-payload handler ───────────────────────────────────────────
-// Handles webhooks that include full booking details directly in the payload.
-// This is fast (no API calls) so it can respond synchronously.
-async function handleFullPayload(payload: any) {
-  const dynamicMap = await loadBeds24Map();
-  const key = payload?.propertyId && payload?.roomId
-    ? `${payload.propertyId}:${payload.roomId}` : null;
-  const roomCode = key ? (dynamicMap[key] || null) : null;
-  if (!roomCode) return NextResponse.json({ ok: true, mapped: false });
-
-  const { data: room } = await supabaseAdmin.from("Room").select("id").eq("code", roomCode).maybeSingle();
-  if (!room) return NextResponse.json({ ok: true, mapped: false });
-
-  if (!payload.bookingId || !payload.arrival || !payload.departure) {
-    return NextResponse.json({ ok: true, mapped: true, applied: false, reason: "missing bookingId/arrival/departure" });
-  }
-
-  const start = new Date(payload.arrival);
-  const end = new Date(payload.departure);
-  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
-    return NextResponse.json({ ok: true, mapped: true, applied: false, reason: "invalid dates" });
-  }
-
-  const externalRef = `beds24-${payload.bookingId}`;
-  const { data: existing } = await supabaseAdmin
-    .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
-
-  const guest0 = Array.isArray(payload.guests) && payload.guests.length > 0 ? payload.guests[0] : {};
-  const gFirstName = guest0.firstName || payload.firstName || "";
-  const gLastName = guest0.lastName || payload.lastName || "";
-  const guestName = gFirstName
-    ? `${gFirstName} ${gLastName}`.trim()
-    : (payload.guestName || "Beds24 гост");
-  const gPhone = guest0.phone || payload.phone || "";
-  const gEmail = guest0.email || payload.email || null;
-
-  try {
-    if (payload.status === "cancelled" && existing) {
-      await supabaseAdmin.from("Reservation").update({ status: "CANCELLED" }).eq("id", existing.id);
-      await supabaseAdmin.from("Notification").insert({
-        type: "CANCEL", title: `Beds24 · Анулиране · ${roomCode}`,
-        detail: `Резервация #${payload.bookingId} анулирана`,
-      });
-    } else if (existing && payload.status !== "cancelled") {
-      await supabaseAdmin.from("Reservation").update({
-        guestName, phone: gPhone, email: gEmail,
-        startDate: start.toISOString(), endDate: end.toISOString(),
-        notes: payload.notes || null, status: "CONFIRMED",
-        roomCode, roomId: room.id, color: getRoomColor(roomCode),
-      }).eq("id", existing.id);
-      await supabaseAdmin.from("Notification").insert({
-        type: "SYSTEM", title: `Beds24 · Промяна · ${roomCode}`,
-        detail: `${guestName} · ${payload.arrival} – ${payload.departure}`,
-      });
-    } else if (!existing && payload.status !== "cancelled") {
-      await supabaseAdmin.from("Reservation").upsert({
-        guestName, phone: gPhone, email: gEmail,
-        roomCode, roomId: room.id,
-        startDate: start.toISOString(), endDate: end.toISOString(),
-        source: "Beds24", notes: payload.notes || null,
-        status: "CONFIRMED", color: getRoomColor(roomCode), externalRef,
-      }, { onConflict: "externalRef" });
-      await supabaseAdmin.from("Notification").insert({
-        type: "NEW", title: `Beds24 · Нова резервация · ${roomCode}`,
-        detail: `${guestName} · ${payload.arrival} – ${payload.departure}`,
-      });
-    }
-    await logSync("PROCESSED", { roomCode, bookingId: payload.bookingId });
-  } catch (e: any) {
-    console.error("[beds24 webhook] apply failed", e);
-    await logSync("ERROR", { error: String(e?.message || e), bookingId: payload.bookingId });
-    return NextResponse.json({ ok: false, error: "apply failed" }, { status: 500 });
-  }
-
-  return NextResponse.json({ ok: true, mappedRoomCode: roomCode });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

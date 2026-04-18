@@ -222,6 +222,7 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
             {[
               { href: "/dashboard", label: "Табло" },
               { href: "/dashboard/calendar", label: "Календар" },
+              { href: "/dashboard/voice-history", label: "🎙 Записи" },
               { href: "/dashboard/settings", label: "Настройки" },
             ].map(item => (
               <Link key={item.href} href={item.href}

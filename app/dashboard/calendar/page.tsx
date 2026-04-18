@@ -242,6 +242,26 @@ export default function CalendarPage() {
   const [whisperAvailable, setWhisperAvailable] = useState<boolean | null>(null);
   const [manualInput, setManualInput] = useState("");
 
+  // Save transcript to history (fire-and-forget, non-critical)
+  function saveTranscriptHistory(text: string, parsed: ReturnType<typeof parseVoice>) {
+    fetch("/api/voice-history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transcript: text,
+        guest_name: parsed.name,
+        room_code: parsed.room,
+        check_in: parsed.start,
+        check_out: parsed.end,
+        phone: parsed.phone,
+        guests: parsed.guests,
+        children: parsed.children,
+        notes: parsed.notes,
+        source: parsed.source,
+      }),
+    }).catch(() => {});
+  }
+
   // Detect iOS/iPadOS — ALL browsers on iOS use WebKit and NONE support SpeechRecognition
   const isIOS = typeof navigator !== "undefined" && (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -292,6 +312,7 @@ export default function CalendarPage() {
         setVoiceStatus("processing");
         const parsed = parseVoice(finalT, yr);
         setVoiceParsed(parsed);
+        saveTranscriptHistory(finalT, parsed);
         setVoiceStatus("idle");
       }
     };
@@ -307,6 +328,7 @@ export default function CalendarPage() {
         setVoiceStatus("processing");
         const parsed = parseVoice(lastTranscriptRef.current, yr);
         setVoiceParsed(parsed);
+        saveTranscriptHistory(lastTranscriptRef.current, parsed);
         setVoiceStatus("idle");
       } else {
         setVoiceStatus(prev => prev === "listening" ? "idle" : prev);
@@ -374,6 +396,7 @@ export default function CalendarPage() {
             setTranscript(data.text);
             const parsed = parseVoice(data.text, yr);
             setVoiceParsed(parsed);
+            saveTranscriptHistory(data.text, parsed);
           } else {
             setTranscript("Не успях да разпозная речта. Опитайте отново или въведете ръчно.");
           }
@@ -429,6 +452,7 @@ export default function CalendarPage() {
     setTranscript(manualInput);
     const parsed = parseVoice(manualInput, yr);
     setVoiceParsed(parsed);
+    saveTranscriptHistory(manualInput, parsed);
     setVoiceStatus("idle");
   }
 

@@ -137,6 +137,14 @@ export default function CalendarPage() {
     return () => clearInterval(iv);
   }, []);
 
+  // ── Beds24 poll every 60s — safety net when webhooks don't fire ──────────
+  useEffect(() => {
+    const poll = () => { fetch("/api/integrations/beds24/poll").catch(() => {}); };
+    poll(); // immediate first poll on page load
+    const iv = setInterval(poll, 60_000);
+    return () => clearInterval(iv);
+  }, []);
+
   // ── Request notification permission on mount ─────────────────────────────
   useEffect(() => {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {

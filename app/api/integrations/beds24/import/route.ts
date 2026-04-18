@@ -110,7 +110,7 @@ export async function POST(req: Request) {
       }).eq("id", existing.id);
       updated++;
     } else {
-      await supabaseAdmin.from("Reservation").insert({
+      await supabaseAdmin.from("Reservation").upsert({
         guestName: guestName.trim() || "Beds24 гост",
         phone: phone || "",
         email: email || null,
@@ -124,7 +124,7 @@ export async function POST(req: Request) {
         externalRef,
         guests: numAdult,
         children: numChild,
-      });
+      }, { onConflict: "externalRef" });
       inserted++;
     }
   }

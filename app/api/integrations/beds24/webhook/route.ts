@@ -104,90 +104,88 @@ async function handleSyncRoom(payload: any) {
                 Number(b.propertyId ?? b.property_id) === propId
   );
 
-  let inserted = 0, updated = 0, cancelled = 0;
+  let inserted = 0, updated = 0, cancelled = 0, errors = 0;
 
   for (const b of roomBookings) {
-    const arrival = b.arrival ?? b.checkin;
-    const departure = b.departure ?? b.checkout;
-    if (!b.id || !arrival || !departure) continue;
+    try {
+      const arrival = b.arrival ?? b.checkin;
+      const departure = b.departure ?? b.checkout;
+      if (!b.id || !arrival || !departure) continue;
 
-    const start = new Date(arrival);
-    const end = new Date(departure);
-    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) continue;
+      const start = new Date(arrival);
+      const end = new Date(departure);
+      if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) continue;
 
-    const externalRef = `beds24-${b.id}`;
-    const guest = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
-    const firstName = guest.firstName || b.firstName || b.guestFirstName || "";
-    const lastName = guest.lastName || b.lastName || b.guestLastName || "";
-    const guestName = (firstName + (lastName ? ` ${lastName}` : "")).trim() || "Beds24 гост";
-    const phone = guest.phone || b.phone || "";
-    const email = guest.email || b.email || null;
-    const isCancelled = b.status === "cancelled" || b.status === "black";
-    const numAdult = Number(b.numAdult) || 1;
-    const numChild = Number(b.numChild) || 0;
+      const externalRef = `beds24-${b.id}`;
+      const guest = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
+      const firstName = guest.firstName || b.firstName || b.guestFirstName || "";
+      const lastName = guest.lastName || b.lastName || b.guestLastName || "";
+      const guestName = (firstName + (lastName ? ` ${lastName}` : "")).trim() || "Beds24 гост";
+      const phone = guest.phone || b.phone || "";
+      const email = guest.email || b.email || null;
+      const isCancelled = b.status === "cancelled" || b.status === "black";
+      const numAdult = Number(b.numAdult) || 1;
+      const numChild = Number(b.numChild) || 0;
 
-    const { data: existing } = await supabaseAdmin
-      .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
+      const { data: existing } = await supabaseAdmin
+        .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
 
-    if (isCancelled) {
-      if (existing && existing.status !== "CANCELLED") {
-        await supabaseAdmin.from("Reservation").update({ status: "CANCELLED" }).eq("id", existing.id);
-        await supabaseAdmin.from("Notification").insert({
-          type: "CANCEL", title: `Beds24 · Анулиране · ${roomCode}`,
-          detail: `Резервация #${b.id} анулирана`,
-        });
-        cancelled++;
+      if (isCancelled) {
+        if (existing && existing.status !== "CANCELLED") {
+          await supabaseAdmin.from("Reservation").update({ status: "CANCELLED" }).eq("id", existing.id);
+          await supabaseAdmin.from("Notification").insert({
+            type: "CANCEL", title: `Beds24 · Анулиране · ${roomCode}`,
+            detail: `Резервация #${b.id} анулирана`,
+          });
+          cancelled++;
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (existing) {
-      await supabaseAdmin.from("Reservation").update({
+      const row = {
         guestName,
         phone: phone || "",
         email: email || null,
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
         endDate: end.toISOString(),
-        status: "CONFIRMED",
+        status: "CONFIRMED" as const,
         color: getRoomColor(roomCode),
         notes: b.notes || null,
         guests: numAdult,
         children: numChild,
-      }).eq("id", existing.id);
-      updated++;
-    } else {
-      await supabaseAdmin.from("Reservation").insert({
-        guestName,
-        phone: phone || "",
-        email: email || null,
-        roomCode, roomId: room.id,
-        startDate: start.toISOString(),
-        endDate: end.toISOString(),
-        source: "Beds24",
-        notes: b.notes || null,
-        status: "CONFIRMED",
-        color: getRoomColor(roomCode),
-        externalRef,
-        guests: numAdult,
-        children: numChild,
-      });
-      await supabaseAdmin.from("Notification").insert({
-        type: "NEW", title: `Beds24 · Нова резервация · ${roomCode}`,
-        detail: `${guestName} · ${arrival} – ${departure}`,
-      });
-      inserted++;
+      };
+
+      if (existing) {
+        await supabaseAdmin.from("Reservation").update(row).eq("id", existing.id);
+        updated++;
+      } else {
+        // Use upsert with onConflict to handle race conditions when
+        // multiple SYNC_ROOM webhooks arrive simultaneously.
+        await supabaseAdmin.from("Reservation").upsert(
+          { ...row, source: "Beds24", externalRef },
+          { onConflict: "externalRef" }
+        );
+        await supabaseAdmin.from("Notification").insert({
+          type: "NEW", title: `Beds24 · Нова резервация · ${roomCode}`,
+          detail: `${guestName} · ${arrival} – ${departure}`,
+        });
+        inserted++;
+      }
+    } catch (e: any) {
+      console.error(`[beds24 webhook] booking ${b.id} failed`, e);
+      errors++;
     }
   }
 
   await logSync("PROCESSED", {
     action: "SYNC_ROOM", roomCode, key,
-    found: roomBookings.length, inserted, updated, cancelled,
+    found: roomBookings.length, inserted, updated, cancelled, errors,
   });
 
   return NextResponse.json({
     ok: true, action: "SYNC_ROOM", roomCode,
-    found: roomBookings.length, inserted, updated, cancelled,
+    found: roomBookings.length, inserted, updated, cancelled, errors,
   });
 }
 
@@ -245,13 +243,13 @@ async function handleFullPayload(payload: any) {
         detail: `${guestName} · ${payload.arrival} – ${payload.departure}`,
       });
     } else if (!existing && payload.status !== "cancelled") {
-      await supabaseAdmin.from("Reservation").insert({
+      await supabaseAdmin.from("Reservation").upsert({
         guestName, phone: gPhone, email: gEmail,
         roomCode, roomId: room.id,
         startDate: start.toISOString(), endDate: end.toISOString(),
         source: "Beds24", notes: payload.notes || null,
         status: "CONFIRMED", color: getRoomColor(roomCode), externalRef,
-      });
+      }, { onConflict: "externalRef" });
       await supabaseAdmin.from("Notification").insert({
         type: "NEW", title: `Beds24 · Нова резервация · ${roomCode}`,
         detail: `${guestName} · ${payload.arrival} – ${payload.departure}`,

@@ -338,9 +338,10 @@ export function parseBGDate(phrase: string, ctx: { now: Date; year: number }): s
   }
 
   // "след N дни / седмица / месец"
-  const afterN = s.match(/след\s+([\p{L}\d\s]+?)\s*(ден|дни|дена|седмица|седмици|месец|месеца)(?![\p{L}])/u);
+  // Also handle "след седмица" (no number = 1) by making the N part optional.
+  const afterN = s.match(/след\s+([\p{L}\d\s]+?\s+)?(ден|дни|дена|седмица|седмици|месец|месеца)(?![\p{L}])/u);
   if (afterN) {
-    const n = parseNumberLike(afterN[1]) ?? 1;
+    const n = afterN[1] ? (parseNumberLike(afterN[1].trim()) ?? 1) : 1;
     const unit = afterN[2];
     const mult = unit.startsWith("седмиц") ? 7 : unit.startsWith("месец") ? 30 : 1;
     return isoOf(addDays(ctx.now, n * mult));
@@ -698,13 +699,22 @@ const NAME_STOP = new Set<string>(
     "възрастни", "възрастен", "деца", "дете", "души", "гости", "човек", "човека",
     "записвам", "запиша", "запиши", "записва",
     // Date-related
-    "днес", "утре", "вдругиден", "вчера", "от", "до", "за", "на", "със", "в",
+    "днес", "утре", "вдругиден", "вчера", "от", "до", "за", "на", "със", "в", "да", "се",
     "пристигане", "заминаване", "чекин", "чекаут",
     // Dictation fillers
     "ами", "значи", "нали", "така", "нека", "де", "бе", "ве", "абе", "тъй", "моля",
-    // Verbs
-    "пристига", "заминава", "настанява", "идва", "тръгва", "напуска", "освобождава",
+    // Verbs (all conjugation forms that Whisper might capitalise)
+    "пристига", "пристигат", "пристигаме", "заминава", "заминават",
+    "настанява", "настаняват", "настаняване", "идва", "идват",
+    "тръгва", "тръгват", "напуска", "напускат", "освобождава", "освобождават",
+    "закъснеят", "закъснее", "закъсне",
     "казва", "името", "гост", "госта", "гостът", "клиент", "клиента", "клиентът",
+    "искат", "искаме", "иска", "трябва", "нужно", "нужен", "имат", "имаме",
+    // Late/early timing words
+    "късно", "късен", "ранно", "ранен", "рано",
+    // Bed/room descriptors
+    "разделени", "разделни", "отделни", "легла", "легло", "двойно", "единично",
+    "след",
     // Number words that Whisper might produce
     "един", "една", "едно", "два", "две", "три", "четири", "пет", "шест",
     "седем", "осем", "девет", "десет", "двама", "трима",
@@ -820,7 +830,10 @@ function extractGuestCount(text: string): number | null {
   // 4) "за N" with bare digit — only if N is 1-9 and not followed by a
   //    duration/date word (нощ/ден/седмица/месец) that would make it a
   //    time expression instead.
-  const bareDigit = s.match(/(?<![\p{L}])за\s+(\d)\s*(?![\p{L}\d]|нощ|ден|дни|дена|седмиц|месец)/u);
+  // "за N" with bare digit — only if N is 1-9 and not followed by a
+  // duration word (нощ/ден/седмица/месец/нощувки). The \s* is INSIDE
+  // the lookahead so a trailing space before "нощувки" still blocks.
+  const bareDigit = s.match(/(?<![\p{L}])за\s+(\d)(?!\s*(?:нощ|ден|дни|дена|седмиц|месец|\d))/u);
   if (bareDigit) {
     const n = parseInt(bareDigit[1], 10);
     if (n >= 1 && n <= 9) return n;
@@ -997,7 +1010,8 @@ function extractSpecialRequests(text: string): string | null {
     [/двойно\s+легло|голямо\s+легло|king\s*size|queen\s*size|едно\s+голямо\s+легло|matrimonial/iu, "двойно легло"],
     [/(?:ранен|ранно|по-?рано)\s+(?:чекин|пристигане|настаняване|check[- ]?in)/u, "ранно пристигане"],
     [/(?:късен|късно|по-?късно)\s+(?:чекаут|заминаване|освобождаване|check[- ]?out)/u, "късно освобождаване"],
-    [/(?:късно|по-?късно)\s+пристига(?:не)?/u, "късно пристигане"],
+    [/(?:късно|по-?късно)\s+(?:пристига(?:не)?|настаняване)/u, "късно пристигане/настаняване"],
+    [/(?:късен|късно|по-?късно)\s+(?:чекин|check[- ]?in)/u, "късно пристигане/настаняване"],
     [/със?\s+закуск[аи]|нощувка\s+със?\s+закуск[аи]|B&B|bed\s+(?:and|&)\s+breakfast/iu, "със закуска"],
     [/(?<![\p{L}])закуск[аи](?![\p{L}])/u, "със закуска"],
     [/(?:полу|полу-)пансион/u, "полупансион"],
@@ -1053,7 +1067,7 @@ function extractSpecialRequests(text: string): string | null {
     [/юбилей/u, "юбилей"],
     [/изненада|сюрприз|surprise/iu, "изненада за гостите"],
     // Late arrival / early departure notes
-    [/пристига(?:т)?\s+късно|ще\s+закъсне(?:ят|е)?|идва(?:т)?\s+късно|late\s+(?:check[- ]?in|arrival)/iu, "късно пристигане"],
+    [/пристига(?:т)?\s+късно|ще\s+закъсне(?:ят|е)?|идва(?:т)?\s+късно|late\s+(?:check[- ]?in|arrival)/iu, "късно пристигане/настаняване"],
     [/рано\s+(?:заминава(?:т)?|тръгва(?:т)?|напуска(?:т)?|замина(?:ват)?)|early\s+(?:check[- ]?out|departure)/iu, "ранно заминаване"],
     [/рано\s+(?:пристига(?:т)?|идва(?:т)?|настанява(?:т)?)/u, "ранно пристигане"],
     // VIP — should become a note, never a name
@@ -1401,9 +1415,10 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     if (fromOnly) start = parseBGDate(fromOnly[1], ctx);
   }
 
-  // Arrival phraseology
+  // Arrival phraseology — handle both singular and plural conjugations:
+  // пристига/пристигат, идва/идват, влиза/влизат, настанява се/настаняват се
   if (!start) {
-    const arrM = s.match(/(?:настанява\s+се|пристига|идва|влиза|check[- ]?in)\s+(?:на\s+)?(.+?)(?:$|\s+(?:за\s+|до\s+|в\s+стая|в\s+апартамент|с\s+телефон|тел(?![\p{L}])))/u);
+    const arrM = s.match(/(?:настанява(?:т)?\s+се|пристига(?:т|ме)?|идва(?:т|ме)?|влиза(?:т|ме)?|check[- ]?in)\s+(?:на\s+)?(.+?)(?:$|\s+(?:за\s+|до\s+|в\s+стая|в\s+апартамент|с\s+телефон|тел(?![\p{L}])|освобождава|заминава|тръгва|напуска|check[- ]?out))/u);
     if (arrM) start = parseBGDate(arrM[1], ctx);
   }
 
@@ -1416,7 +1431,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   // Departure phraseology
   let departureOnly = false;
   if (!end) {
-    const depM = s.match(/(?:заминава|тръгва|напуска|освобождава|check[- ]?out)\s+(?:на\s+)?(.+?)(?:$|\s+(?:за\s+|в\s+стая|в\s+апартамент|с\s+телефон|тел(?![\p{L}])))/u);
+    const depM = s.match(/(?:заминава(?:т|ме)?|тръгва(?:т|ме)?|напуска(?:т|ме)?|освобождава(?:т|ме)?|check[- ]?out)\s+(?:на\s+)?(.+?)(?:$|\s+(?:за\s+|в\s+стая|в\s+апартамент|с\s+телефон|тел(?![\p{L}])))/u);
     if (depM) {
       end = parseBGDate(depM[1], ctx);
       if (end && !start) departureOnly = true;
@@ -1461,6 +1476,9 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
       new RegExp(`([\\p{L}\\d\\s]+?\\s+(?:${Object.keys(MONTHS).join("|")})(?:\\s+\\d{4})?)(?![\\p{L}])`, "u"),
       /((?:следващ(?:ия|ата)?|другия|другата|този|тази|идния|идната)\s+(?:понеделник|вторник|сряда|четвъртък|петък|събота|неделя))/u,
       /(?<![\p{L}])(днес|утре|вдругиден|другиден|вчера|довечера|утрешния)(?![\p{L}])/u,
+      // "след N дни/дена/седмица/месец" — relative date
+      // Handles both "след 10 дена" and "след седмица" (no number = 1).
+      /(?<![\p{L}])(след\s+(?:[\p{L}\d]+\s+)?(?:ден|дни|дена|седмица|седмици|месец|месеца))(?![\p{L}])/u,
       new RegExp(`((?:по\\s+|на\\s+|за\\s+)?(?:${holidayAlt}))`, "u"),
     ];
     for (const re of candidateRegexes) {

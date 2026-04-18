@@ -237,38 +237,41 @@ export default function CalendarPage() {
 
   // ── voice ─────────────────────────────────────────────────────────────────
   const lastTranscriptRef = useRef("");
+  const mediaRecRef = useRef<any>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const [whisperAvailable, setWhisperAvailable] = useState<boolean | null>(null);
+  const [manualInput, setManualInput] = useState("");
+  const hasSpeechAPI = typeof window !== "undefined" && !!(
+    (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+  );
 
-  function startVoice() {
+  // Check if Whisper backend is configured (once on mount)
+  useEffect(() => {
+    fetch("/api/transcribe").then(r => r.json())
+      .then(d => setWhisperAvailable(d.available === true))
+      .catch(() => setWhisperAvailable(false));
+  }, []);
+
+  // Start native SpeechRecognition (Chrome/Firefox/Edge/macOS Safari)
+  function startNativeVoice() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) {
-      alert("Гласовото попълване не се поддържа в този браузър. Моля, използвайте Chrome, Safari или Edge.");
-      return;
-    }
-
-    // Detect Safari (needs different handling)
-    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-
+    if (!SR) return;
     const rec = new SR();
     rec.lang = "bg-BG";
     rec.continuous = false;
-    // Safari doesn't handle interimResults well — disable for Safari
-    rec.interimResults = !isSafari;
+    rec.interimResults = true;
     rec.maxAlternatives = 1;
     recogRef.current = rec;
     lastTranscriptRef.current = "";
     setVoiceStatus("listening");
-    setTranscript(isSafari ? "Слушам... (Safari)" : "");
+    setTranscript("");
 
     rec.onresult = (e: any) => {
       let finalT = "";
       let interimT = "";
       for (let i = 0; i < e.results.length; i++) {
-        const result = e.results[i];
-        if (result.isFinal) {
-          finalT += result[0].transcript;
-        } else {
-          interimT += result[0].transcript;
-        }
+        if (e.results[i].isFinal) finalT += e.results[i][0].transcript;
+        else interimT += e.results[i][0].transcript;
       }
       const displayText = finalT || interimT;
       if (displayText) {
@@ -282,25 +285,14 @@ export default function CalendarPage() {
         setVoiceStatus("idle");
       }
     };
-
     rec.onerror = (e: any) => {
-      console.warn("Voice error:", e.error, e);
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        alert("Микрофонът е блокиран. Моля, разрешете достъп до микрофона в настройките на браузъра.");
-      } else if (e.error === "no-speech") {
-        // Safari often fires this — try to process whatever we got
-        if (lastTranscriptRef.current) {
-          setVoiceStatus("processing");
-          const parsed = parseVoice(lastTranscriptRef.current, yr);
-          setVoiceParsed(parsed);
-        }
+      console.warn("Voice error:", e.error);
+      if (e.error === "not-allowed") {
+        alert("Микрофонът е блокиран. Разрешете достъп в настройките.");
       }
       setVoiceStatus("idle");
     };
-
     rec.onend = () => {
-      // Safari fires onend immediately after getting results.
-      // If we have a transcript but no voiceParsed yet, process it now.
       if (lastTranscriptRef.current && !voiceParsed) {
         setVoiceStatus("processing");
         const parsed = parseVoice(lastTranscriptRef.current, yr);
@@ -310,19 +302,86 @@ export default function CalendarPage() {
         setVoiceStatus(prev => prev === "listening" ? "idle" : prev);
       }
     };
+    try { rec.start(); } catch { setVoiceStatus("idle"); }
+  }
 
-    // Safari may throw if mic permission isn't granted yet
+  // Start MediaRecorder (iOS fallback → sends to Whisper API)
+  async function startMediaRecording() {
     try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Safari prefers audio/mp4; Chrome prefers audio/webm
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : "";
+      const rec = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      rec.ondataavailable = (e: any) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: rec.mimeType || "audio/webm" });
+        if (blob.size < 1000) { setVoiceStatus("idle"); return; }
+        setVoiceStatus("processing");
+        setTranscript("Изпращам към Whisper...");
+        try {
+          const fd = new FormData();
+          fd.append("audio", blob, "recording.webm");
+          const res = await fetch("/api/transcribe", { method: "POST", body: fd });
+          const data = await res.json();
+          if (data.text) {
+            setTranscript(data.text);
+            const parsed = parseVoice(data.text, yr);
+            setVoiceParsed(parsed);
+          } else {
+            setTranscript("Не успях да разпозная речта. Опитайте отново.");
+          }
+        } catch (e) {
+          console.error("Whisper transcribe failed:", e);
+          setTranscript("Грешка при транскрипция. Опитайте ръчно въвеждане.");
+        }
+        setVoiceStatus("idle");
+      };
+      mediaRecRef.current = rec;
       rec.start();
+      setVoiceStatus("listening");
+      setTranscript("");
     } catch (err) {
-      console.error("Voice start failed:", err);
-      alert("Не може да се стартира микрофонът. Проверете дали сте разрешили достъп.");
+      console.error("MediaRecorder start failed:", err);
+      alert("Не може да се стартира микрофонът. Проверете дали сте разрешили достъп до микрофона.");
       setVoiceStatus("idle");
     }
   }
 
+  function startVoice() {
+    if (hasSpeechAPI) {
+      startNativeVoice();
+    } else if (whisperAvailable) {
+      startMediaRecording();
+    }
+    // If neither available, the UI shows manual text input instead
+  }
+
+  // Process manual text input
+  function processManualInput() {
+    if (!manualInput.trim()) return;
+    setVoiceStatus("processing");
+    setTranscript(manualInput);
+    const parsed = parseVoice(manualInput, yr);
+    setVoiceParsed(parsed);
+    setVoiceStatus("idle");
+  }
+
   function stopVoice() {
     try { recogRef.current?.stop(); } catch {}
+    try {
+      if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
+        mediaRecRef.current.stop(); // triggers onstop → Whisper
+        return; // don't set idle yet, onstop handler will
+      }
+    } catch {}
     setVoiceStatus("idle");
   }
 
@@ -827,24 +886,61 @@ export default function CalendarPage() {
 
       {/* ═══════════ VOICE MODAL ═══════════ */}
       {voiceOpen && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.6)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"40px 14px", zIndex:110 }}
+        <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.6)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"24px 14px", zIndex:110, overflowY:"auto" }}
           onClick={e => { if (e.currentTarget===e.target) { stopVoice(); setVoiceOpen(false); } }}>
           <div style={{ background:"#fff", borderRadius:"14px", width:"560px", maxWidth:"100%", overflow:"hidden", border:"1px solid #dedad4", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
             <div style={{ background:"#12121c", padding:"15px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
               <div>
                 <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>🎤 Гласово попълване</div>
-                <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>Поддържа Chrome, Safari, Edge · Говорете на български</div>
+                <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>
+                  {hasSpeechAPI ? "Chrome, Firefox, Edge · Говорете на български" :
+                   whisperAvailable ? "Записване + Whisper AI · Говорете на български" :
+                   "Въведете текст или използвайте клавиатурата"}
+                </div>
               </div>
-              <button onClick={() => { stopVoice(); setVoiceOpen(false); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
+              <button onClick={() => { stopVoice(); setVoiceOpen(false); setManualInput(""); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
             </div>
             <div style={{ padding:"20px" }}>
-              <button onClick={voiceStatus==="listening" ? stopVoice : startVoice}
-                style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none", WebkitTapHighlightColor:"transparent" }}>
-                {voiceStatus==="listening" ? "🔴" : voiceStatus==="processing" ? "⏳" : "🎤"}
-              </button>
-              <div style={{ textAlign:"center", fontSize:"13px", color:"#555", marginBottom:"14px", minHeight:"20px" }}>
-                {voiceStatus==="idle" ? "Натисни микрофона и говори на български" : voiceStatus==="listening" ? "Слушам... говорете ясно" : "Обработвам..."}
-              </div>
+
+              {/* MODE 1: Native SpeechRecognition (desktop Chrome/Firefox/Edge/macOS Safari) */}
+              {/* MODE 2: MediaRecorder + Whisper (iOS with API key) */}
+              {(hasSpeechAPI || whisperAvailable) && (
+                <>
+                  <button onClick={voiceStatus==="listening" ? stopVoice : startVoice}
+                    style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none", WebkitTapHighlightColor:"transparent" }}>
+                    {voiceStatus==="listening" ? "🔴" : voiceStatus==="processing" ? "⏳" : "🎤"}
+                  </button>
+                  <div style={{ textAlign:"center", fontSize:"13px", color:"#555", marginBottom:"14px", minHeight:"20px" }}>
+                    {voiceStatus==="idle"
+                      ? (whisperAvailable && !hasSpeechAPI
+                          ? "Натисни микрофона, говори, после натисни отново за спиране"
+                          : "Натисни микрофона и говори на български")
+                      : voiceStatus==="listening"
+                      ? (whisperAvailable && !hasSpeechAPI ? "🔴 Записвам... натисни микрофона за край" : "Слушам... говорете ясно")
+                      : "Обработвам..."}
+                  </div>
+                </>
+              )}
+
+              {/* MODE 3: Manual text input (iOS without Whisper key) */}
+              {!hasSpeechAPI && !whisperAvailable && (
+                <div style={{ marginBottom:"14px" }}>
+                  <div style={{ background:"#fef3c7", border:"1px solid #fcd34d", borderRadius:"8px", padding:"10px 12px", marginBottom:"12px", fontSize:"12px", color:"#78350f" }}>
+                    Вашият браузър не поддържа гласово разпознаване. Можете да въведете командата с текст или да използвате бутона 🎤 на клавиатурата за диктовка.
+                  </div>
+                  <textarea
+                    value={manualInput}
+                    onChange={e => setManualInput(e.target.value)}
+                    placeholder="Резервация за Иван Петров стая 1.3 от пети май до десети май"
+                    style={{ width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px", fontSize:"14px", background:"#faf9f7", color:"#111", resize:"none", height:"80px", outline:"none", boxSizing:"border-box" }}
+                  />
+                  <button onClick={processManualInput} disabled={!manualInput.trim()}
+                    style={{ marginTop:"8px", background: manualInput.trim() ? "#6c63ff" : "#ddd", color:"#fff", border:"none", borderRadius:"8px", padding:"10px 16px", fontSize:"13px", fontWeight:"600", cursor: manualInput.trim() ? "pointer" : "not-allowed", width:"100%" }}>
+                    Обработи текста
+                  </button>
+                </div>
+              )}
+
               {transcript && (
                 <div style={{ background:"#f5f3ef", borderRadius:"8px", padding:"12px", minHeight:"50px", fontSize:"13px", color:"#333", marginBottom:"14px", border:"1px solid #e5e2dc", fontStyle:"italic" }}>
                   &ldquo;{transcript}&rdquo;
@@ -860,7 +956,7 @@ export default function CalendarPage() {
                   ))}
                 </div>
               )}
-              {!voiceParsed && !transcript && (
+              {!voiceParsed && !transcript && (hasSpeechAPI || whisperAvailable) && (
                 <div style={{ background:"#faf9f7", borderRadius:"8px", padding:"12px", border:"1px solid #e5e2dc", marginBottom:"14px" }}>
                   <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", marginBottom:"7px" }}>Примерни команди:</div>
                   {["Резервация за Иван Петров стая 1.3 от пети май до десети май","Запиши Мария Иванова стая 2.4.1 от 12 юни до 15 юни","Нова резервация стая 41.0.2 Georgi Kolev от 3 юли до 7 юли"].map((ex,i) => (
@@ -875,7 +971,7 @@ export default function CalendarPage() {
                   style={{ background: voiceParsed ? "#6c63ff" : "#ddd", color:"#fff", border:"none", borderRadius:"8px", padding:"12px 18px", fontSize:"14px", fontWeight:"600", cursor: voiceParsed ? "pointer" : "not-allowed", flex:1, WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>
                   ✓ Потвърди и продължи
                 </button>
-                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px 14px", fontSize:"14px", cursor:"pointer", WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>🔄 Опитай пак</button>
+                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); setManualInput(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px 14px", fontSize:"14px", cursor:"pointer", WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>🔄 Опитай пак</button>
               </div>
             </div>
           </div>

@@ -343,7 +343,13 @@ export function parseBGDate(phrase: string, ctx: { now: Date; year: number }): s
   if (afterN) {
     const n = afterN[1] ? (parseNumberLike(afterN[1].trim()) ?? 1) : 1;
     const unit = afterN[2];
-    const mult = unit.startsWith("седмиц") ? 7 : unit.startsWith("месец") ? 30 : 1;
+    if (unit.startsWith("месец")) {
+      // Use real calendar months — "след 2 месеца" from Apr 18 = Jun 18, not Jun 17
+      const d = new Date(ctx.now);
+      d.setMonth(d.getMonth() + n);
+      return isoOf(d);
+    }
+    const mult = unit.startsWith("седмиц") ? 7 : 1;
     return isoOf(addDays(ctx.now, n * mult));
   }
 

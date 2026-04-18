@@ -10,12 +10,13 @@ function fmtS(ds: string) {
   return `${String(d.getDate()).padStart(2,"0")}.${String(d.getMonth()+1).padStart(2,"0")}`;
 }
 
-export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayCo }: {
+export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayCo, onVoice }: {
   children: React.ReactNode;
   stats?: { active: number; occ: number; rev: number; month: number; selFmt: string };
   onNewRes?: () => void;
   onTodayRes?: () => void;
   onTodayCo?: () => void;
+  onVoice?: () => void;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -30,6 +31,8 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
   const [search, setSearch] = useState("");
   const [roomPopup, setRoomPopup] = useState<any>(null);
   const [notifDetail, setNotifDetail] = useState<any>(null);
+  const [notifEditForm, setNotifEditForm] = useState<any>(null);
+  const [notifEditSaving, setNotifEditSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/rooms").then(r => r.json()).then(d => Array.isArray(d) && setRooms(d));
@@ -72,6 +75,40 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
     const nd = await fetch("/api/notifications").then(r => r.json());
     if (Array.isArray(nd)) setNotifications(nd);
     setNotifDetail(null);
+  }
+
+  async function saveAndRestore(id: string) {
+    if (!notifEditForm) return;
+    setNotifEditSaving(true);
+    try {
+      // First save edits
+      await fetch(`/api/reservations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          guestName: notifEditForm.guestName,
+          phone: notifEditForm.phone,
+          email: notifEditForm.email || null,
+          roomCode: notifEditForm.roomCode,
+          startDate: notifEditForm.startDate,
+          endDate: notifEditForm.endDate,
+          notes: notifEditForm.notes || null,
+          guests: Number(notifEditForm.guests) || 1,
+          children: Number(notifEditForm.children) || 0,
+          status: "CONFIRMED",
+        }),
+      });
+      // Refresh
+      const data = await fetch("/api/reservations?includeCancelled=1").then(r => r.json());
+      if (Array.isArray(data)) setReservations(data);
+      const nd = await fetch("/api/notifications").then(r => r.json());
+      if (Array.isArray(nd)) setNotifications(nd);
+      setNotifDetail(null);
+      setNotifEditForm(null);
+    } catch (e) {
+      console.error("saveAndRestore error", e);
+    }
+    setNotifEditSaving(false);
   }
 
   // Room popup: get reservations for next 6 months
@@ -169,7 +206,7 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
               style={{ background:sidebarCardBg, color:"#b45309", border:"1px solid #fcd34d", borderRadius:"8px", padding:"9px 12px", fontSize:"12px", cursor:"pointer", display:"flex", alignItems:"center", gap:"8px", width:"100%", whiteSpace:"nowrap" }}>🚪 Днешни освобождавания</button>
 
             {[
-              { icon:"🎤", label:"Гласово попълване", action: () => router.push("/dashboard/calendar?voice=1") },
+              { icon:"🎤", label:"Гласово попълване", action: () => onVoice ? onVoice() : router.push("/dashboard/calendar?voice=1") },
               { icon:"🔔", label:"Нотификации", action: openNotif },
               { icon:"⚡", label:"Синхронизирай сега", action: doSync, warn: true },
             ].map((btn, i) => (
@@ -292,8 +329,9 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
             {notifications.map((n: any) => {
               const isCancelNotif = n.type === "CANCEL";
               const linkedRes = n.reservationId ? reservations.find(r => r.id === n.reservationId) : null;
-              const canRevert = isCancelNotif && linkedRes && linkedRes.status === "CANCELLED" && linkedRes.cancelledAt &&
-                (Date.now() - new Date(linkedRes.cancelledAt).getTime()) < 24 * 60 * 60 * 1000;
+              const canRevert = isCancelNotif && linkedRes && linkedRes.status === "CANCELLED" && (
+                !linkedRes.cancelledAt || (Date.now() - new Date(linkedRes.cancelledAt).getTime()) < 24 * 60 * 60 * 1000
+              );
 
               return (
                 <div key={n.id} onClick={() => setNotifDetail(n)}
@@ -324,13 +362,13 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
       {/* ═══════════ NOTIFICATION DETAIL POPUP ═══════════ */}
       {notifDetail && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.4)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:250 }}
-          onClick={() => setNotifDetail(null)}>
-          <div onClick={e => e.stopPropagation()} style={{ background:"#fff", borderRadius:"16px", width:"480px", maxWidth:"95vw", overflow:"hidden", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
-            <div style={{ background:"#12121c", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          onClick={() => { setNotifDetail(null); setNotifEditForm(null); }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:"#fff", borderRadius:"16px", width:"520px", maxWidth:"95vw", maxHeight:"90vh", overflow:"hidden", boxShadow:"0 20px 60px rgba(0,0,0,.3)", display:"flex", flexDirection:"column" }}>
+            <div style={{ background:"#12121c", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
               <span style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>Детайли за известието</span>
-              <button onClick={() => setNotifDetail(null)} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
+              <button onClick={() => { setNotifDetail(null); setNotifEditForm(null); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
             </div>
-            <div style={{ padding:"20px" }}>
+            <div style={{ padding:"20px", overflowY:"auto" }}>
               <div style={{ fontSize:"14px", fontWeight:"600", color:"#222", marginBottom:"4px" }}>
                 {notifDetail.type === "CANCEL" ? "🚫" : notifDetail.type === "NEW" ? "✅" : "ℹ️"} {notifDetail.title}
               </div>
@@ -341,29 +379,107 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
                 const linkedRes = notifDetail.reservationId ? reservations.find(r => r.id === notifDetail.reservationId) : null;
                 if (!linkedRes) return null;
                 const isCancelled = linkedRes.status === "CANCELLED";
-                const canRevert = isCancelled && linkedRes.cancelledAt &&
-                  (Date.now() - new Date(linkedRes.cancelledAt).getTime()) < 24 * 60 * 60 * 1000;
+                const canRevert = isCancelled && (
+                  !linkedRes.cancelledAt || (Date.now() - new Date(linkedRes.cancelledAt).getTime()) < 24 * 60 * 60 * 1000
+                );
+
+                // Initialize edit form when opening a cancelled notification detail
+                if (isCancelled && canRevert && !notifEditForm) {
+                  setTimeout(() => setNotifEditForm({
+                    guestName: linkedRes.guestName || "",
+                    phone: linkedRes.phone || "",
+                    email: linkedRes.email || "",
+                    roomCode: linkedRes.roomCode || "",
+                    startDate: linkedRes.startDate?.slice(0,10) || "",
+                    endDate: linkedRes.endDate?.slice(0,10) || "",
+                    notes: linkedRes.notes || "",
+                    guests: String(linkedRes.guests || 1),
+                    children: String(linkedRes.children || 0),
+                  }), 0);
+                }
+
+                const inputStyle = { height:"34px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 10px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none", boxSizing:"border-box" as const };
+                const labelStyle = { fontSize:"10px", fontWeight:"700" as const, color:"#888", display:"block", marginBottom:"3px" };
 
                 return (
                   <div style={{ background:"#faf9f7", borderRadius:"10px", border:"1px solid #e5e2dc", padding:"14px" }}>
-                    <div style={{ fontSize:"13px", fontWeight:"700", color:"#111", marginBottom:"6px" }}>Резервация</div>
-                    <div style={{ fontSize:"13px", color:"#444" }}><strong>Гост:</strong> {linkedRes.guestName}</div>
-                    <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Стая:</strong> {linkedRes.roomCode}</div>
-                    <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Дати:</strong> {fmtS(linkedRes.startDate.slice(0,10))} — {fmtS(linkedRes.endDate.slice(0,10))}</div>
-                    <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Телефон:</strong> {linkedRes.phone || "—"}</div>
-                    <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Източник:</strong> {linkedRes.source}</div>
-                    <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Статус:</strong> <span style={{ color: isCancelled ? "#dc2626" : "#059669", fontWeight:"600" }}>{isCancelled ? "Анулирана" : "Потвърдена"}</span></div>
-                    {linkedRes.notes && <div style={{ fontSize:"12px", color:"#888", marginTop:"4px", fontStyle:"italic" }}>{linkedRes.notes}</div>}
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
+                      <div style={{ fontSize:"13px", fontWeight:"700", color:"#111" }}>Резервация</div>
+                      <span style={{ fontSize:"11px", padding:"3px 8px", borderRadius:"5px", background: isCancelled ? "#fef2f2" : "#ecfdf5", color: isCancelled ? "#dc2626" : "#059669", fontWeight:"600", border: isCancelled ? "1px solid #fca5a5" : "1px solid #6ee7b7" }}>
+                        {isCancelled ? "Анулирана" : "Потвърдена"}
+                      </span>
+                    </div>
 
-                    {canRevert && (
-                      <button onClick={() => revertCancel(linkedRes.id)}
-                        style={{ marginTop:"12px", background:"#059669", color:"#fff", border:"none", borderRadius:"8px", padding:"10px 20px", fontSize:"14px", fontWeight:"700", cursor:"pointer", width:"100%" }}>
-                        Възстанови резервацията
-                      </button>
-                    )}
-                    {isCancelled && !canRevert && linkedRes.cancelledAt && (
-                      <div style={{ marginTop:"10px", fontSize:"12px", color:"#dc2626", background:"#fef2f2", padding:"8px 10px", borderRadius:"6px" }}>
-                        Срокът за възстановяване (24 часа) е изтекъл.
+                    {/* Editable form for cancelled reservations within revert window */}
+                    {isCancelled && canRevert && notifEditForm ? (
+                      <div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"8px" }}>
+                          <div style={{ gridColumn:"1 / -1" }}>
+                            <label style={labelStyle}>ГОСТ</label>
+                            <input value={notifEditForm.guestName} onChange={e => setNotifEditForm((f:any) => ({...f, guestName:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ТЕЛЕФОН</label>
+                            <input value={notifEditForm.phone} onChange={e => setNotifEditForm((f:any) => ({...f, phone:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>EMAIL</label>
+                            <input value={notifEditForm.email} onChange={e => setNotifEditForm((f:any) => ({...f, email:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>СТАЯ</label>
+                            <select value={notifEditForm.roomCode} onChange={e => setNotifEditForm((f:any) => ({...f, roomCode:e.target.value}))} style={inputStyle}>
+                              <option value="">Избери...</option>
+                              {rooms.map(r => <option key={r.id} value={r.code}>{r.code} · {r.label}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ИЗТОЧНИК</label>
+                            <div style={{ ...inputStyle, display:"flex", alignItems:"center", fontSize:"13px", color:"#555" }}>{linkedRes.source}</div>
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ДАТА НАЧАЛО</label>
+                            <input type="date" value={notifEditForm.startDate} onChange={e => setNotifEditForm((f:any) => ({...f, startDate:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ДАТА КРАЙ</label>
+                            <input type="date" value={notifEditForm.endDate} onChange={e => setNotifEditForm((f:any) => ({...f, endDate:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ВЪЗРАСТНИ</label>
+                            <input type="number" value={notifEditForm.guests} onChange={e => setNotifEditForm((f:any) => ({...f, guests:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div>
+                            <label style={labelStyle}>ДЕЦА</label>
+                            <input type="number" value={notifEditForm.children} onChange={e => setNotifEditForm((f:any) => ({...f, children:e.target.value}))} style={inputStyle} />
+                          </div>
+                          <div style={{ gridColumn:"1 / -1" }}>
+                            <label style={labelStyle}>БЕЛЕЖКИ</label>
+                            <textarea value={notifEditForm.notes} onChange={e => setNotifEditForm((f:any) => ({...f, notes:e.target.value}))}
+                              style={{ width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"8px 10px", fontSize:"13px", background:"#faf9f7", color:"#111", resize:"none", height:"48px", outline:"none", boxSizing:"border-box" }} />
+                          </div>
+                        </div>
+                        <button onClick={() => saveAndRestore(linkedRes.id)} disabled={notifEditSaving}
+                          style={{ marginTop:"6px", background:"#059669", color:"#fff", border:"none", borderRadius:"8px", padding:"11px 20px", fontSize:"14px", fontWeight:"700", cursor: notifEditSaving ? "not-allowed" : "pointer", width:"100%", opacity: notifEditSaving ? 0.6 : 1 }}>
+                          {notifEditSaving ? "Запазване..." : "💾 Запази промените и възстанови"}
+                        </button>
+                      </div>
+                    ) : (
+                      /* Read-only view for non-cancelled or expired */
+                      <div>
+                        <div style={{ fontSize:"13px", color:"#444" }}><strong>Гост:</strong> {linkedRes.guestName}</div>
+                        <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Стая:</strong> {linkedRes.roomCode}</div>
+                        <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Дати:</strong> {fmtS(linkedRes.startDate.slice(0,10))} — {fmtS(linkedRes.endDate.slice(0,10))}</div>
+                        <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Телефон:</strong> {linkedRes.phone || "—"}</div>
+                        <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Източник:</strong> {linkedRes.source}</div>
+                        {linkedRes.notes && <div style={{ fontSize:"12px", color:"#888", marginTop:"4px", fontStyle:"italic" }}>{linkedRes.notes}</div>}
+                        <div style={{ fontSize:"13px", color:"#444", marginTop:"3px" }}><strong>Възрастни:</strong> {linkedRes.guests || 1} · <strong>Деца:</strong> {linkedRes.children || 0}</div>
+
+                        {isCancelled && !canRevert && (
+                          <div style={{ marginTop:"10px", fontSize:"12px", color:"#dc2626", background:"#fef2f2", padding:"8px 10px", borderRadius:"6px" }}>
+                            Срокът за възстановяване (24 часа) е изтекъл.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

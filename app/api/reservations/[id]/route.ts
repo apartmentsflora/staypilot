@@ -9,20 +9,20 @@ import { updateBeds24Booking, cancelBeds24Booking } from "@/lib/beds24";
 const PatchInput = z.object({
   guestName: z.string().trim().min(1).max(120).optional(),
   phone: z.string().trim().max(40).optional(),
-  email: z.string().trim().email().optional().nullable(),
+  email: z.string().trim().optional().nullable().transform(v => v === "" ? null : v),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
-  notes: z.string().trim().max(2000).optional().nullable(),
+  notes: z.string().trim().max(2000).optional().nullable().transform(v => v === "" ? null : v),
   status: z.enum(["CONFIRMED", "CANCELLED", "HOLD"]).optional(),
   color: z.string().optional(),
   roomCode: z.string().trim().optional(),
   source: z.string().trim().max(40).optional(),
-  guests: z.union([z.string(), z.number()]).optional(),
-  children: z.union([z.string(), z.number()]).optional(),
-  pricePerNight: z.union([z.string(), z.number()]).optional(),
+  guests: z.any().optional(),
+  children: z.any().optional(),
+  pricePerNight: z.any().optional(),
   arrivalTime: z.string().optional(),
   departTime: z.string().optional(),
-});
+}).passthrough();
 
 function normalizeDate(v: string | undefined): string | undefined {
   if (!v) return undefined;

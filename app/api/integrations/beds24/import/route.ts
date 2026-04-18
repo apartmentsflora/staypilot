@@ -91,6 +91,9 @@ export async function POST(req: Request) {
       continue;
     }
 
+    const numAdult = Number(b.numAdult) || 1;
+    const numChild = Number(b.numChild) || 0;
+
     if (existing) {
       await supabaseAdmin.from("Reservation").update({
         guestName: guestName.trim() || "Beds24 гост",
@@ -102,6 +105,8 @@ export async function POST(req: Request) {
         status: "CONFIRMED",
         color: getRoomColor(roomCode),
         notes: b.notes || null,
+        guests: numAdult,
+        children: numChild,
       }).eq("id", existing.id);
       updated++;
     } else {
@@ -117,6 +122,8 @@ export async function POST(req: Request) {
         status: "CONFIRMED",
         color: getRoomColor(roomCode),
         externalRef,
+        guests: numAdult,
+        children: numChild,
       });
       inserted++;
     }

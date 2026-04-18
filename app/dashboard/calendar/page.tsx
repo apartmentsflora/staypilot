@@ -29,6 +29,40 @@ function chipStyle(src: string) {
   return { bg, bd, tx };
 }
 
+// ── Distinct per-reservation colors ───────────────────────────────────────
+// 16 visually distinct palettes: bg | border | text
+const RES_PALETTE = [
+  "#eef2ff|#818cf8|#312e81", // indigo
+  "#fef3c7|#f59e0b|#78350f", // amber
+  "#dcfce7|#4ade80|#14532d", // green
+  "#fce7f3|#f472b6|#831843", // pink
+  "#e0e7ff|#6366f1|#3730a3", // blue-indigo
+  "#fed7aa|#fb923c|#7c2d12", // orange
+  "#d1fae5|#34d399|#064e3b", // emerald
+  "#ede9fe|#a78bfa|#4c1d95", // violet
+  "#fef9c3|#facc15|#713f12", // yellow
+  "#cffafe|#22d3ee|#155e75", // cyan
+  "#ffe4e6|#fb7185|#9f1239", // rose
+  "#dbeafe|#60a5fa|#1e3a8a", // blue
+  "#f3e8ff|#c084fc|#581c87", // purple
+  "#ccfbf1|#2dd4bf|#134e4a", // teal
+  "#ffedd5|#fdba74|#9a3412", // light-orange
+  "#e0f2fe|#38bdf8|#075985", // sky
+];
+function hashId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+function resStyle(r: { id: string; source: string }) {
+  // Use hash of reservation ID to pick a distinct color
+  const idx = hashId(r.id) % RES_PALETTE.length;
+  const [bg, bd, tx] = RES_PALETTE[idx].split("|");
+  return { bg, bd, tx };
+}
+
 const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", arrivalTime:"14:00", departTime:"11:00" };
 
 // ── main component ────────────────────────────────────────────────────────────
@@ -107,6 +141,15 @@ export default function CalendarPage() {
   useEffect(() => {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission();
+    }
+  }, []);
+
+  // ── Open voice modal from URL query param (?voice=1) ────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("voice") === "1") {
+      setVoiceOpen(true);
+      window.history.replaceState({}, "", "/dashboard/calendar");
     }
   }, []);
 
@@ -324,6 +367,7 @@ export default function CalendarPage() {
       onNewRes={() => openNewRes()}
       onTodayRes={() => setTodayFullScreen("res")}
       onTodayCo={() => setTodayFullScreen("co")}
+      onVoice={() => setVoiceOpen(true)}
     >
       <style dangerouslySetInnerHTML={{__html: mobileCSS}} />
       <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
@@ -378,11 +422,11 @@ export default function CalendarPage() {
                       {dr.length > 0 && <span style={{ fontSize:"10px", background:"#6c63ff", color:"#fff", borderRadius:"4px", padding:"1px 5px", fontWeight:"600" }}>{dr.length}</span>}
                     </div>
                     {dr.slice(0,3).map(r => {
-                      const cs = chipStyle(r.source);
+                      const cs = resStyle(r);
                       return (
                         <div key={r.id} style={{ borderRadius:"7px", padding:"5px 7px", marginBottom:"3px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, display:"flex", alignItems:"center", gap:"5px" }}
                           onClick={e => { e.stopPropagation(); openEditRes(r); }}>
-                          <div style={{ width:"18px", height:"18px", borderRadius:"50%", background:cs.bd, color:cs.tx, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"8px", fontWeight:"700", flexShrink:0 }}>
+                          <div style={{ width:"18px", height:"18px", borderRadius:"50%", background:cs.bd, color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"8px", fontWeight:"700", flexShrink:0 }}>
                             {(r.guestName||"?")[0].toUpperCase()}
                           </div>
                           <div style={{ minWidth:0 }}>
@@ -410,12 +454,12 @@ export default function CalendarPage() {
               </div>
               {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма активни резервации.</div>}
               {activeToday.slice(0,4).map(r => {
-                const cs = chipStyle(r.source);
+                const cs = resStyle(r);
                 return (
                   <div key={r.id} onClick={e => { e.stopPropagation(); openEditRes(r); }}
                     style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer", transition:"transform .1s" }}>
                     <div style={{ display:"flex", alignItems:"flex-start", gap:"9px" }}>
-                      <div style={{ width:"30px", height:"30px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"11px", fontWeight:"700", flexShrink:0 }}>{(r.guestName||"?")[0]}</div>
+                      <div style={{ width:"30px", height:"30px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"11px", fontWeight:"700", flexShrink:0, color:"#fff" }}>{(r.guestName||"?")[0]}</div>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:"13px", fontWeight:"700" }}>{r.guestName}</div>
                         <div style={{ fontSize:"11px", opacity:.75, marginTop:"2px" }}>Стая {r.roomCode} · {r.phone}</div>
@@ -426,7 +470,7 @@ export default function CalendarPage() {
                         </div>
                       </div>
                       <button onClick={e => { e.stopPropagation(); setCancelConfirm(r); }}
-                        style={{ fontSize:"10px", padding:"3px 8px", borderRadius:"5px", background:"rgba(255,255,255,.6)", border:`1px solid ${cs.bd}`, cursor:"pointer", color:cs.tx, flexShrink:0 }}>Анулирай</button>
+                        style={{ fontSize:"10px", padding:"3px 8px", borderRadius:"5px", background:"rgba(255,255,255,.7)", border:"1px solid #fca5a5", cursor:"pointer", color:"#dc2626", flexShrink:0 }}>Анулирай</button>
                     </div>
                   </div>
                 );
@@ -485,7 +529,7 @@ export default function CalendarPage() {
                       {tlDays.map(d => {
                         const ds = toDS(d); const isSel = ds === sel;
                         const res = visRes.find(r => r.roomCode === room.code && inRange(ds, r));
-                        const cs = res ? chipStyle(res.source) : null;
+                        const cs = res ? resStyle(res) : null;
                         return (
                           <td key={ds} style={{ borderBottom:"1px solid #f0ede8", borderRight:"1px solid #f0ede8", padding:"4px 5px", height:"52px", background: isSel ? "#f9f8ff" : "#fff", verticalAlign:"middle" }}>
                             {res && cs ? (
@@ -523,10 +567,11 @@ export default function CalendarPage() {
                   Синхронизира се с Beds24 и Booking.com
                 </div>
               </div>
-              <div style={{ display:"flex", gap:"8px" }}>
-                {!editingRes && (
-                  <button onClick={() => { setModal(false); setVoiceOpen(true); }} style={{ background:"#1e1e2e", color:"#a09fff", border:"1px solid #2a2a40", borderRadius:"7px", padding:"6px 12px", cursor:"pointer", fontSize:"12px" }}>🎤 Гласово</button>
-                )}
+              <div style={{ display:"flex", gap:"8px", alignItems:"center" }}>
+                <button onClick={() => { setModal(false); setVoiceOpen(true); }}
+                  style={{ background:"linear-gradient(135deg,#6c63ff,#4a43cc)", color:"#fff", border:"2px solid #a09fff", borderRadius:"8px", padding:"7px 14px", cursor:"pointer", fontSize:"13px", fontWeight:"600", display:"flex", alignItems:"center", gap:"6px", whiteSpace:"nowrap", boxShadow:"0 2px 8px rgba(108,99,255,.3)" }}>
+                  🎤 Гласово попълване
+                </button>
                 <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
               </div>
             </div>
@@ -601,7 +646,7 @@ export default function CalendarPage() {
                   <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", letterSpacing:".4px", textTransform:"uppercase", marginBottom:"8px", paddingBottom:"6px", borderBottom:"1px solid #eee" }}>Активни резервации за {fmtS(sel)}</div>
                   {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb" }}>Няма активни.</div>}
                   {activeToday.map(r => {
-                    const cs = chipStyle(r.source);
+                    const cs = resStyle(r);
                     return (
                       <div key={r.id} onClick={() => { setModal(false); setTimeout(() => openEditRes(r), 100); }}
                         style={{ borderRadius:"9px", padding:"8px 10px", marginBottom:"6px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
@@ -618,7 +663,7 @@ export default function CalendarPage() {
                 <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", letterSpacing:".4px", textTransform:"uppercase", marginBottom:"8px", paddingBottom:"6px", borderBottom:"1px solid #eee" }}>Активни резервации за {fmtS(sel)}</div>
                 {activeToday.length === 0 && <div style={{ fontSize:"12px", color:"#bbb", padding:"8px 0" }}>Няма активни.</div>}
                 {activeToday.map(r => {
-                  const cs = chipStyle(r.source);
+                  const cs = resStyle(r);
                   return (
                     <div key={r.id} onClick={() => { setModal(false); setTimeout(() => openEditRes(r), 100); }}
                       style={{ borderRadius:"9px", padding:"10px 12px", marginBottom:"8px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
@@ -691,7 +736,7 @@ export default function CalendarPage() {
             {todayFullScreen === "res" ? (
               activeToday.length === 0 ? <div style={{ color:"#bbb", padding:"20px", textAlign:"center" }}>Няма активни резервации.</div> :
               activeToday.map(r => {
-                const cs = chipStyle(r.source);
+                const cs = resStyle(r);
                 return (
                   <div key={r.id} onClick={() => { setTodayFullScreen(null); openEditRes(r); }}
                     style={{ borderRadius:"12px", padding:"14px 16px", marginBottom:"10px", background:cs.bg, border:`1px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>

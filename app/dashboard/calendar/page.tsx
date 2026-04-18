@@ -1008,7 +1008,7 @@ export default function CalendarPage() {
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"14px" }}>
                   {([
                     ["Гост", voiceParsed.name],
-                    ["Стая", voiceParsed.room],
+                    ["Стая", voiceParsed.room || "⚠ Моля, кажете стая"],
                     ["От дата", voiceParsed.start ? fmtS(voiceParsed.start) : null],
                     ["До дата", voiceParsed.end ? fmtS(voiceParsed.end) : null],
                     ["Възрастни", voiceParsed.guests != null ? String(voiceParsed.guests) : null],
@@ -1020,12 +1020,20 @@ export default function CalendarPage() {
                     ["Заминаване", voiceParsed.departureTime],
                     ["Източник", voiceParsed.source],
                     ["Бележки", voiceParsed.notes],
-                  ] as [string, string | null][]).filter(([,v]) => v != null).map(([lbl, val]) => (
-                    <div key={lbl} style={{ background:"#f0efff", borderRadius:"7px", padding:"8px 11px", border:"1px solid #ddd3fe", ...((lbl === "Бележки" || lbl === "Източник") ? { gridColumn: "1 / -1" } : {}) }}>
-                      <div style={{ fontSize:"10px", fontWeight:"700", color:"#6c63ff", letterSpacing:".3px" }}>{lbl.toUpperCase()}</div>
-                      <div style={{ fontSize:"12px", fontWeight:"600", color:"#3b0764", marginTop:"3px" }}>{val}</div>
+                  ] as [string, string | null][]).filter(([,v]) => v != null).map(([lbl, val]) => {
+                    const isRoomWarning = lbl === "Стая" && !voiceParsed.room;
+                    return (
+                    <div key={lbl} style={{
+                      background: isRoomWarning ? "#fff0f0" : "#f0efff",
+                      borderRadius:"7px", padding:"8px 11px",
+                      border: isRoomWarning ? "1px solid #ffb3b3" : "1px solid #ddd3fe",
+                      ...((lbl === "Бележки" || lbl === "Източник") ? { gridColumn: "1 / -1" } : {})
+                    }}>
+                      <div style={{ fontSize:"10px", fontWeight:"700", color: isRoomWarning ? "#dc2626" : "#6c63ff", letterSpacing:".3px" }}>{lbl.toUpperCase()}</div>
+                      <div style={{ fontSize:"12px", fontWeight:"600", color: isRoomWarning ? "#dc2626" : "#3b0764", marginTop:"3px" }}>{val}</div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               {!voiceParsed && !transcript && (hasSpeechAPI || whisperAvailable) && (

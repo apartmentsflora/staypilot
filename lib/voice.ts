@@ -546,8 +546,11 @@ function roomCodeHaystack(transcript: string): string {
 }
 
 export function matchRoomCode(transcript: string): string | null {
-  const anchored = roomCodeHaystack(transcript);
   const lower = transcript.toLowerCase();
+  const anchored = roomCodeHaystack(transcript);
+  // Track whether we found a room-context word (стая/апартамент/etc.)
+  // If not, we must be conservative — digits elsewhere might be dates/phone/counts.
+  const hasRoomContext = anchored !== lower;
 
   // Normalise Cyrillic "а" → Latin "a" for 1.3A matching throughout.
   const anchoredNorm = anchored.replace(/а/g, "a");
@@ -563,14 +566,17 @@ export function matchRoomCode(transcript: string): string | null {
   //    sequences and match via DIGIT_TO_ROOM. This handles "2-4-2"→"242",
   //    "41 0 1"→"4101", "1-3-A"→"13a", etc. Longest-first DIGIT_ROOM_KEYS
   //    ensures "4101" matches before "41".
-  //    The regex also grabs trailing A/а for room 1.3A: "1-3-A", "13A".
-  const rawDigitSeqs = anchoredNorm.match(/\d[\d.\-\s]*[\d][.\-\s]?[aаAА]|\d[\d.\-\s]*\d/g);
-  if (rawDigitSeqs) {
-    for (const seq of rawDigitSeqs) {
-      const stripped = seq.replace(/[.\-\s]/g, "").toLowerCase().replace(/а/g, "a");
-      for (const dk of DIGIT_ROOM_KEYS) {
-        if (stripped === dk || stripped.startsWith(dk)) {
-          return DIGIT_TO_ROOM[dk];
+  //    ONLY when room-context exists — otherwise bare numbers like "13" in
+  //    "13 май" would false-match room 1.3.
+  if (hasRoomContext) {
+    const rawDigitSeqs = anchoredNorm.match(/\d[\d.\-\s]*[\d][.\-\s]?[aаAА]|\d[\d.\-\s]*\d/g);
+    if (rawDigitSeqs) {
+      for (const seq of rawDigitSeqs) {
+        const stripped = seq.replace(/[.\-\s]/g, "").toLowerCase().replace(/а/g, "a");
+        for (const dk of DIGIT_ROOM_KEYS) {
+          if (stripped === dk || stripped.startsWith(dk)) {
+            return DIGIT_TO_ROOM[dk];
+          }
         }
       }
     }
@@ -580,10 +586,14 @@ export function matchRoomCode(transcript: string): string | null {
   //     E.g., "1-3-A" or "1.3а" — the digit-seq regex above catches "1-3"
   //     but might miss the trailing letter. Try anchored slice with all
   //     punctuation stripped.
-  const fullyStripped = anchoredNorm.replace(/[.\-\s,;:!?]/g, "").toLowerCase();
-  for (const dk of DIGIT_ROOM_KEYS) {
-    if (fullyStripped === dk || fullyStripped.startsWith(dk)) {
-      return DIGIT_TO_ROOM[dk];
+  //     ONLY safe when there's a room-context word — otherwise "13 май"
+  //     gets fully-stripped to "13май" which startsWith "13" → room 1.3.
+  if (hasRoomContext) {
+    const fullyStripped = anchoredNorm.replace(/[.\-\s,;:!?]/g, "").toLowerCase();
+    for (const dk of DIGIT_ROOM_KEYS) {
+      if (fullyStripped === dk || fullyStripped.startsWith(dk)) {
+        return DIGIT_TO_ROOM[dk];
+      }
     }
   }
 
@@ -603,49 +613,43 @@ export function matchRoomCode(transcript: string): string | null {
     if (norm.includes(c.toLowerCase())) return c;
   }
 
-  // 5) Concatenated digit sequences from Whisper (e.g., "242" → "2.4.2").
-  const digitSeqs: string[] = [];
-  for (const src of [anchored, norm]) {
-    const seqs = src.match(/\d{2,4}[aаAА]?/g);
-    if (seqs) digitSeqs.push(...seqs);
-  }
-  for (const seq of digitSeqs) {
-    const key = seq.toLowerCase().replace(/а/g, "a");
-    for (const dk of DIGIT_ROOM_KEYS) {
-      if (key === dk || key.startsWith(dk)) {
-        return DIGIT_TO_ROOM[dk];
-      }
+  // Steps 5-8 use aggressive digit matching. Only safe when there's an
+  // explicit room-context word (стая/апартамент/номер), otherwise digits
+  // from dates ("15 май"), phone numbers, or guest counts get mismatched.
+  if (hasRoomContext) {
+    // 5) Concatenated digit sequences from Whisper (e.g., "242" → "2.4.2").
+    const digitSeqs: string[] = [];
+    for (const src of [anchored, norm]) {
+      const seqs = src.match(/\d{2,4}[aаAА]?/g);
+      if (seqs) digitSeqs.push(...seqs);
     }
-  }
-
-  // 6) Digit-window: split individual digits/numbers and try joining them.
-  const windowDigits = norm.replace(/[^\d\s]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-  for (let len = Math.min(4, windowDigits.length); len >= 2; len--) {
-    for (let i = 0; i + len <= windowDigits.length; i++) {
-      const win = windowDigits.slice(i, i + len);
-      const candidates = [win.join("."), win.join("-"), win.join("")];
-      for (const cand of candidates) {
-        const match = ROOM_CODES_BY_LEN.find(c => c.toLowerCase() === cand.toLowerCase());
-        if (match) return match;
-      }
-    }
-  }
-
-  // 7) Single-digit sequences on whole transcript → DIGIT_TO_ROOM
-  const fullDigitSeqs = lower.match(/\d{2,4}[aаAА]?/g);
-  if (fullDigitSeqs) {
-    for (const seq of fullDigitSeqs) {
+    for (const seq of digitSeqs) {
       const key = seq.toLowerCase().replace(/а/g, "a");
       for (const dk of DIGIT_ROOM_KEYS) {
-        if (key === dk) return DIGIT_TO_ROOM[dk];
+        if (key === dk || key.startsWith(dk)) {
+          return DIGIT_TO_ROOM[dk];
+        }
+      }
+    }
+
+    // 6) Digit-window: split individual digits/numbers and try joining them.
+    const windowDigits = norm.replace(/[^\d\s]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+    for (let len = Math.min(4, windowDigits.length); len >= 2; len--) {
+      for (let i = 0; i + len <= windowDigits.length; i++) {
+        const win = windowDigits.slice(i, i + len);
+        const candidates = [win.join("."), win.join("-"), win.join("")];
+        for (const cand of candidates) {
+          const match = ROOM_CODES_BY_LEN.find(c => c.toLowerCase() === cand.toLowerCase());
+          if (match) return match;
+        }
       }
     }
   }
 
-  // 8) Final fallback — scan whole transcript literally, longest first.
-  for (const c of ROOM_CODES_BY_LEN) {
-    if (lower.includes(c.toLowerCase())) return c;
-  }
+  // 7-8 REMOVED: scanning the whole transcript for digit sequences or
+  // literal room codes without room-context caused false matches on dates
+  // (e.g., "15 май" → room 1.5). If no room-context word was spoken, the
+  // user didn't specify a room — return null so the UI can warn them.
   return null;
 }
 
@@ -663,30 +667,80 @@ function extractPhone(text: string): string | null {
 
   // 6.b — spelled-out digits, including "+" spoken as "плюс"
   //         e.g. "плюс три пет девет осем осем осем две три четири пет шест седем"
+  //         Also handles Bulgarian grouped patterns like:
+  //         "четири тройки" = 3333 (four threes), "три петици" = 555, etc.
   const tokens = text.toLowerCase().split(/\s+/);
   const DIGIT: Record<string, string> = {
     "нула": "0", "едно": "1", "един": "1", "една": "1",
     "две": "2", "два": "2", "три": "3", "четири": "4",
     "пет": "5", "шест": "6", "седем": "7", "осем": "8", "девет": "9",
   };
+  // Grouped digit patterns: "N <plural-digit>" = repeat digit N times
+  // "четири тройки" = "3333", "три петици" = "555", "две осмици" = "88"
+  const DIGIT_PLURAL: Record<string, string> = {
+    "нули": "0", "единици": "1", "двойки": "2", "тройки": "3",
+    "четворки": "4", "петици": "5", "шестици": "6", "седмици": "7",
+    "осмици": "8", "деветки": "9",
+  };
   let run: string[] = [];
   let best: string[] = [];
   let plusSeen = false, bestPlus = false;
-  for (const tk of tokens) {
+  let pendingCount: number | null = null;  // for "четири тройки" pattern
+  for (let ti = 0; ti < tokens.length; ti++) {
+    const tk = tokens[ti];
     if (tk === "плюс" || tk === "+") {
       plusSeen = true;
       continue;
     }
+    // Check for grouped pattern: current token is a count, next is a plural digit
+    if (DIGIT_PLURAL[tk] != null && pendingCount != null) {
+      // "четири тройки" → repeat "3" four times
+      for (let r = 0; r < pendingCount; r++) run.push(DIGIT_PLURAL[tk]);
+      pendingCount = null;
+      if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
+      continue;
+    }
+    // If previous token was a count word but this isn't a plural digit,
+    // treat the pending count as a regular digit
+    if (pendingCount != null) {
+      run.push(String(pendingCount));
+      if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
+      pendingCount = null;
+    }
+
     if (DIGIT[tk] != null) {
+      // Peek ahead: might be a count for grouped pattern
+      const nextTk = tokens[ti + 1];
+      if (nextTk && DIGIT_PLURAL[nextTk] != null) {
+        pendingCount = parseInt(DIGIT[tk], 10);
+        continue;
+      }
       run.push(DIGIT[tk]);
       if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
     } else if (/^\d+$/.test(tk)) {
+      // Peek ahead for grouped pattern: "4 тройки"
+      const nextTk = tokens[ti + 1];
+      if (nextTk && DIGIT_PLURAL[nextTk] != null && tk.length <= 2) {
+        pendingCount = parseInt(tk, 10);
+        continue;
+      }
       for (const ch of tk) run.push(ch);
       if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
     } else {
+      // Flush pending
+      if (pendingCount != null) {
+        run.push(String(pendingCount));
+        if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
+        pendingCount = null;
+      }
       run = [];
       plusSeen = false;
     }
+  }
+  // Flush any remaining pending count
+  if (pendingCount != null) {
+    run.push(String(pendingCount));
+    if (run.length > best.length) { best = [...run]; bestPlus = plusSeen; }
   }
   if (best.length >= 9) return (bestPlus ? "+" : "") + best.join("");
   return null;
@@ -870,7 +924,13 @@ function extractGuestCount(text: string): number | null {
     const n = parseNumberLike(weBe[1]);
     if (n != null && n >= 1 && n <= 20) return n;
   }
-  if (/(?<![\p{L}])семейство(?![\p{L}])/u.test(s)) return 4;
+  // "семейство" alone — DON'T assume guest count (could be 2-6 people).
+  // Only use it if an explicit count follows, e.g., "семейство от 4".
+  const familyOf = s.match(/семейство\s+(?:от\s+)?(\d{1,2}|[\p{L}]+)\s*(?:души|човека)?/u);
+  if (familyOf) {
+    const n = parseNumberLike(familyOf[1]);
+    if (n != null && n >= 2 && n <= 10) return n;
+  }
   if (/(?<![\p{L}])компания(?![\p{L}])/u.test(s)) return 6;
 
   return null;
@@ -1183,11 +1243,35 @@ function extractDurationNights(text: string): number | null {
   }
   if (best != null) return best;
 
-  const wk = s.match(/(?<![\p{L}])за\s+([\p{L}\d\s]+?)\s*(седмиц[аи])(?![\p{L}])/u);
+  // "за седмица" / "за N седмици" — handles both with and without number
+  const wk = s.match(/(?<![\p{L}])за\s+([\p{L}\d]+\s+)?(седмиц[аи])(?![\p{L}])/u);
   if (wk) {
-    const tail = wk[1].trim().split(/\s+/).slice(-3).join(" ");
-    const n = parseNumberLike(tail) ?? 1;
+    const n = wk[1] ? (parseNumberLike(wk[1].trim()) ?? 1) : 1;
     return n * 7;
+  }
+
+  // "за месец" / "за N месеца" — convert to approximate nights (30/month)
+  const mo = s.match(/(?<![\p{L}])за\s+([\p{L}\d\s]+?\s+)?(месец|месеца)(?![\p{L}])/u);
+  if (mo) {
+    const n = mo[1] ? (parseNumberLike(mo[1].trim()) ?? 1) : 1;
+    return n * 30;
+  }
+
+  // "ще остане за месец/седмица/N дни" — "ще остане" or "остава" prefix
+  const stayFor = s.match(/(?:ще\s+остане|остава(?:т)?|ще\s+бъде)\s+за\s+([\p{L}\d\s]+?)\s*(нощувк[аи]|нощи|нощ|ден|дни|дена|седмиц[аи]|месец|месеца)(?![\p{L}])/u);
+  if (stayFor) {
+    const n = parseNumberLike(stayFor[1].trim()) ?? 1;
+    const unit = stayFor[2];
+    if (unit.startsWith("седмиц")) return n * 7;
+    if (unit.startsWith("месец")) return n * 30;
+    return n;
+  }
+
+  // Bare "N дни" / "N нощи" WITHOUT "за" prefix (e.g., "13 май 3 дни")
+  const bareDuration = s.match(/(?<![\p{L}])(\d{1,2})\s*(дни|дена|нощи|нощувк[аи])(?![\p{L}])/u);
+  if (bareDuration) {
+    const n = parseInt(bareDuration[1], 10);
+    if (n >= 1 && n <= 60) return n;
   }
 
   const oneN = s.match(/(?<![\p{L}\d])(една|едно|1)\s+(нощ|вечер)(?![\p{L}])/u);

@@ -236,25 +236,45 @@ export default function CalendarPage() {
   const tlDays = useMemo(() => Array.from({length:9}, (_,i) => addD(tlAnchor, i)), [tlAnchor]);
 
   // ── voice ─────────────────────────────────────────────────────────────────
+  const lastTranscriptRef = useRef("");
+
   function startVoice() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { alert("Гласовото попълване не се поддържа в този браузър. Моля, използвайте Chrome, Safari или Edge."); return; }
+    if (!SR) {
+      alert("Гласовото попълване не се поддържа в този браузър. Моля, използвайте Chrome, Safari или Edge.");
+      return;
+    }
+
+    // Detect Safari (needs different handling)
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
     const rec = new SR();
     rec.lang = "bg-BG";
     rec.continuous = false;
-    rec.interimResults = true;
-    rec.maxAlternatives = 3;
+    // Safari doesn't handle interimResults well — disable for Safari
+    rec.interimResults = !isSafari;
+    rec.maxAlternatives = 1;
     recogRef.current = rec;
+    lastTranscriptRef.current = "";
     setVoiceStatus("listening");
-    setTranscript("");
+    setTranscript(isSafari ? "Слушам... (Safari)" : "");
+
     rec.onresult = (e: any) => {
       let finalT = "";
       let interimT = "";
       for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) finalT += e.results[i][0].transcript;
-        else interimT += e.results[i][0].transcript;
+        const result = e.results[i];
+        if (result.isFinal) {
+          finalT += result[0].transcript;
+        } else {
+          interimT += result[0].transcript;
+        }
       }
-      setTranscript(finalT + interimT);
+      const displayText = finalT || interimT;
+      if (displayText) {
+        setTranscript(displayText);
+        lastTranscriptRef.current = displayText;
+      }
       if (finalT) {
         setVoiceStatus("processing");
         const parsed = parseVoice(finalT, yr);
@@ -262,14 +282,43 @@ export default function CalendarPage() {
         setVoiceStatus("idle");
       }
     };
+
     rec.onerror = (e: any) => {
-      console.warn("Voice error:", e.error);
+      console.warn("Voice error:", e.error, e);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        alert("Микрофонът е блокиран. Моля, разрешете достъп до микрофона в настройките на браузъра.");
+      } else if (e.error === "no-speech") {
+        // Safari often fires this — try to process whatever we got
+        if (lastTranscriptRef.current) {
+          setVoiceStatus("processing");
+          const parsed = parseVoice(lastTranscriptRef.current, yr);
+          setVoiceParsed(parsed);
+        }
+      }
       setVoiceStatus("idle");
     };
+
     rec.onend = () => {
-      setVoiceStatus(prev => prev === "listening" ? "idle" : prev);
+      // Safari fires onend immediately after getting results.
+      // If we have a transcript but no voiceParsed yet, process it now.
+      if (lastTranscriptRef.current && !voiceParsed) {
+        setVoiceStatus("processing");
+        const parsed = parseVoice(lastTranscriptRef.current, yr);
+        setVoiceParsed(parsed);
+        setVoiceStatus("idle");
+      } else {
+        setVoiceStatus(prev => prev === "listening" ? "idle" : prev);
+      }
     };
-    rec.start();
+
+    // Safari may throw if mic permission isn't granted yet
+    try {
+      rec.start();
+    } catch (err) {
+      console.error("Voice start failed:", err);
+      alert("Не може да се стартира микрофонът. Проверете дали сте разрешили достъп.");
+      setVoiceStatus("idle");
+    }
   }
 
   function stopVoice() {

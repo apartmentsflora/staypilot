@@ -91,6 +91,11 @@ export async function POST(req: Request) {
   if (payload?.action === "SYNC_ROOM") {
     return handleSyncRoom(payload, startMs);
   }
+  // Handle PING / test webhooks — always return 200 so Beds24 doesn't
+  // mark our endpoint as unhealthy and stop sending real webhooks.
+  if (payload?.action === "PING" || payload?.action === "TEST") {
+    return NextResponse.json({ ok: true, action: payload.action, received: true });
+  }
   return handleBookingWebhook(payload, startMs);
 }
 

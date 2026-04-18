@@ -86,6 +86,7 @@ export default function CalendarPage() {
   const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
   const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|null>(null);
   const lastFetchRef = useRef<string>("");
+  const [syncing, setSyncing] = useState(false);
 
   // Form state
   const [form, setForm] = useState<any>({...EMPTY_FORM});
@@ -137,13 +138,29 @@ export default function CalendarPage() {
     return () => clearInterval(iv);
   }, []);
 
-  // ── Beds24 poll every 60s — safety net when webhooks don't fire ──────────
+  // ── Beds24 auto-sync every 2 min — safety net when webhooks don't fire ──
+  // Calls the full import endpoint (same as Sync Now button) automatically.
+  // 2 properties / ~15 bookings — lightweight call, well within rate limits.
+  const syncingRef = useRef(false);
+  const syncNow = useCallback(async () => {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/integrations/beds24/import", { method: "POST" });
+      if (res.ok) {
+        await load();
+      }
+    } catch { /* non-fatal */ }
+    setSyncing(false);
+    syncingRef.current = false;
+  }, [load]);
+
   useEffect(() => {
-    const poll = () => { fetch("/api/integrations/beds24/poll").catch(() => {}); };
-    poll(); // immediate first poll on page load
-    const iv = setInterval(poll, 60_000);
+    syncNow(); // immediate first sync on page load
+    const iv = setInterval(syncNow, 2 * 60_000); // every 2 minutes
     return () => clearInterval(iv);
-  }, []);
+  }, [syncNow]);
 
   // ── Request notification permission on mount ─────────────────────────────
   useEffect(() => {
@@ -590,8 +607,12 @@ export default function CalendarPage() {
             })}
             <div style={{ display:"flex", alignItems:"center", gap:"5px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"7px", padding:"5px 10px", fontSize:"11px", color:"#15803d" }}>
               <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#22c55e", animation:"pulse 2s infinite" }} />
-              Синхр. активна · 10с
+              Beds24 · 2мин
             </div>
+            <button onClick={syncNow} disabled={syncing}
+              style={{ background: syncing ? "#fef3c7" : "#eff6ff", color: syncing ? "#92400e" : "#1d4ed8", border: `1px solid ${syncing ? "#fcd34d" : "#93c5fd"}`, borderRadius:"7px", padding:"5px 12px", fontSize:"11px", fontWeight:"600", cursor: syncing ? "default" : "pointer", opacity: syncing ? 0.8 : 1 }}>
+              {syncing ? "⟳ Синхр..." : "⟳ Sync Now"}
+            </button>
             <button onClick={() => openNewRes(toDS(now))}
               style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"7px 14px", fontSize:"12px", fontWeight:"600", cursor:"pointer" }}>
               + Нова резервация

@@ -9,24 +9,25 @@ import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 // Beds24 polling endpoint — safety net when webhooks fail
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Called by the frontend every 60 seconds. Fetches ALL bookings from both
+// Called by the frontend every 2 minutes. Fetches ALL bookings from both
 // Flora properties for the next 365 days and upserts them.
 //
-// This is the fallback that guarantees sync even if Beds24 webhooks stop
-// firing. Lightweight: skips bookings that haven't changed (same dates,
-// same status, same guest).
+// For 2 properties / ~15 bookings this is a lightweight call, well within
+// Beds24's rate limits (their warning targets booking-engine style
+// real-time search across hundreds of properties).
 //
-// Rate limiting: won't run more than once per 50 seconds to prevent
+// Rate limiting: won't run more than once per 90 seconds to prevent
 // multiple browser tabs from hammering the API.
 //
 // No authentication required — it only READS from Beds24 and WRITES to
 // our own DB. No sensitive data is exposed in the response.
 // ═══════════════════════════════════════════════════════════════════════════
 
+const MIN_INTERVAL_MS = 90_000; // 90 seconds between polls
 const CANCELLED_STATUSES = new Set(["cancelled", "black"]);
 
 export async function GET() {
-  // ── Rate limit: skip if last poll was < 50s ago ──
+  // ── Rate limit: skip if last poll was < 90s ago ──
   try {
     const { data: lastSync } = await supabaseAdmin
       .from("SyncEvent")
@@ -40,7 +41,7 @@ export async function GET() {
 
     if (lastSync) {
       const elapsed = Date.now() - new Date(lastSync.createdAt).getTime();
-      if (elapsed < 50_000) {
+      if (elapsed < MIN_INTERVAL_MS) {
         return NextResponse.json({ ok: true, skipped: true, reason: "too soon", elapsedMs: elapsed });
       }
     }
@@ -61,6 +62,7 @@ export async function GET() {
   // ── Process bookings ──
   const dynamicMap = await loadBeds24Map();
   let inserted = 0, updated = 0, cancelled = 0, skipped = 0, errors = 0;
+  const newBookings: string[] = []; // collect for single summary notification
 
   for (const b of bookings) {
     try {
@@ -94,8 +96,17 @@ export async function GET() {
       const numAdult = Math.max(1, Number(b.numAdult || g0.numAdult) || 1);
       const numChild = Math.max(0, Number(b.numChild || g0.numChild) || 0);
 
-      const { data: existing } = await supabaseAdmin
+      // ── Check if reservation already exists ──
+      // IMPORTANT: check for error too — if SELECT fails, treat as "skip"
+      // rather than creating duplicate notifications.
+      const { data: existing, error: selectErr } = await supabaseAdmin
         .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
+
+      if (selectErr) {
+        console.error(`[beds24-poll] SELECT failed for ${externalRef}:`, selectErr.message);
+        errors++;
+        continue;
+      }
 
       if (isCancelled) {
         if (existing && existing.status !== "CANCELLED") {
@@ -125,24 +136,35 @@ export async function GET() {
         await supabaseAdmin.from("Reservation").update(row).eq("id", existing.id);
         updated++;
       } else {
-        await supabaseAdmin.from("Reservation").upsert(
+        // Genuinely new booking — insert it
+        const { error: upsertErr } = await supabaseAdmin.from("Reservation").upsert(
           { ...row, source: "Beds24", externalRef },
           { onConflict: "externalRef" },
         );
-        // Only notify on genuinely new bookings found by poll
-        try {
-          await supabaseAdmin.from("Notification").insert({
-            type: "NEW",
-            title: `Beds24 · Нова резервация · ${roomCode}`,
-            detail: `${guestName} · ${arrival} – ${departure}`,
-          });
-        } catch { /* non-fatal */ }
+        if (upsertErr) {
+          console.error(`[beds24-poll] upsert failed for ${externalRef}:`, upsertErr.message);
+          errors++;
+          continue;
+        }
+        newBookings.push(`${roomCode} · ${guestName} · ${arrival} – ${departure}`);
         inserted++;
       }
     } catch (e: any) {
       console.error(`[beds24-poll] booking ${b.id} failed:`, e);
       errors++;
     }
+  }
+
+  // ── Single summary notification for ALL new bookings found in this poll ──
+  // No per-booking notifications — prevents spam if poll runs multiple times
+  if (newBookings.length > 0) {
+    try {
+      await supabaseAdmin.from("Notification").insert({
+        type: "NEW",
+        title: `Beds24 · Poll · ${newBookings.length} нови резервации`,
+        detail: newBookings.join(" | "),
+      });
+    } catch { /* non-fatal */ }
   }
 
   const durationMs = Date.now() - startMs;

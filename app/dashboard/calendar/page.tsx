@@ -365,6 +365,11 @@ export default function CalendarPage() {
 
           if (data.error === "NO_API_KEY") {
             setTranscript("Whisper API ключът не е конфигуриран. Използвайте ръчно въвеждане.");
+          } else if (data.error === "AUDIO_TOO_SHORT") {
+            setTranscript(data.message || "Записът е твърде кратък. Моля, опитайте отново.");
+          } else if (data.warning) {
+            // Hallucination or no-speech detected by server
+            setTranscript(data.message || "Не беше разпознат говор. Моля, опитайте отново.");
           } else if (data.text) {
             setTranscript(data.text);
             const parsed = parseVoice(data.text, yr);

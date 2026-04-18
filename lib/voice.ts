@@ -530,35 +530,37 @@ const ROOM_CODES_BY_LEN = [...ALL_ROOM_CODES].sort((a, b) => b.length - a.length
  */
 function roomCodeHaystack(transcript: string): string {
   const lower = transcript.toLowerCase();
-  const m = lower.match(/(?:стая|апартамент|стаичка|апартаментче|номер)\s+([\p{L}\d\s.\-]+)$/u);
-  return m ? m[1] : lower;
+  // Match the room-code slice after "стая" etc., stopping at a comma,
+  // period, or reservation-keyword boundary — not just end-of-string.
+  // Note: dots and dashes are PART of room codes (e.g., "41.0.1", "41-2"),
+  // so they must NOT appear in the stop-character set.
+  const m = lower.match(/(?:стая|апартамент|стаичка|апартаментче|номер)\s+([\p{L}\d\s.\-]+?)(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|телефон|тел(?![\p{L}])|бележк|коментар|паркинг|закуск|пристига|заминава|идва|тръгва|чекин|чекаут|check|потвърден|непотвърден|фирмен|корпоратив|от\s+букинг|от\s+еърбнб|airbnb|booking|по\s+\d)|$)/u);
+  return m ? m[1].trim() : lower;
 }
 
 export function matchRoomCode(transcript: string): string | null {
   const anchored = roomCodeHaystack(transcript);
   const lower = transcript.toLowerCase();
 
-  // 1) literal substring, longest first, on the anchored slice.
+  // Normalise Cyrillic "а" → Latin "a" for 1.3A matching throughout.
+  const anchoredNorm = anchored.replace(/а/g, "a");
+
+  // 1) Literal substring, longest first, on the anchored slice.
+  //    Also try Cyrillic-а-normalised version.
   for (const c of ROOM_CODES_BY_LEN) {
-    if (anchored.includes(c.toLowerCase())) return c;
+    const cl = c.toLowerCase();
+    if (anchored.includes(cl) || anchoredNorm.includes(cl)) return c;
   }
 
-  // 1b) Whisper often writes "2-4-2" or "4-1" with dashes. Try replacing
-  //     dashes with dots (and vice-versa) to match room codes like "2.4.2".
-  const dashToDot = anchored.replace(/-/g, ".");
-  const dotToDash = anchored.replace(/\./g, "-");
-  for (const variant of [dashToDot, dotToDash]) {
-    for (const c of ROOM_CODES_BY_LEN) {
-      if (variant.includes(c.toLowerCase())) return c;
-    }
-  }
-
-  // 1c) Try stripping all separators from digit-dash-dot sequences and
-  //     matching via DIGIT_TO_ROOM: "2-4-2" → "242" → "2.4.2"
-  const rawDigitSeqs = anchored.match(/\d[\d.\-]+\d[aаAА]?/g);
+  // 2) Strip ALL separators (dashes, dots, spaces) from digit-separator
+  //    sequences and match via DIGIT_TO_ROOM. This handles "2-4-2"→"242",
+  //    "41 0 1"→"4101", "1-3-A"→"13a", etc. Longest-first DIGIT_ROOM_KEYS
+  //    ensures "4101" matches before "41".
+  //    The regex also grabs trailing A/а for room 1.3A: "1-3-A", "13A".
+  const rawDigitSeqs = anchoredNorm.match(/\d[\d.\-\s]*[\d][.\-\s]?[aаAА]|\d[\d.\-\s]*\d/g);
   if (rawDigitSeqs) {
     for (const seq of rawDigitSeqs) {
-      const stripped = seq.replace(/[.\-]/g, "").toLowerCase();
+      const stripped = seq.replace(/[.\-\s]/g, "").toLowerCase().replace(/а/g, "a");
       for (const dk of DIGIT_ROOM_KEYS) {
         if (stripped === dk || stripped.startsWith(dk)) {
           return DIGIT_TO_ROOM[dk];
@@ -567,22 +569,41 @@ export function matchRoomCode(transcript: string): string | null {
     }
   }
 
-  // 2) normalised spoken-digit form on the anchored slice.
+  // 2b) Also try the "A" suffix on sequences that end right before an A/а.
+  //     E.g., "1-3-A" or "1.3а" — the digit-seq regex above catches "1-3"
+  //     but might miss the trailing letter. Try anchored slice with all
+  //     punctuation stripped.
+  const fullyStripped = anchoredNorm.replace(/[.\-\s,;:!?]/g, "").toLowerCase();
+  for (const dk of DIGIT_ROOM_KEYS) {
+    if (fullyStripped === dk || fullyStripped.startsWith(dk)) {
+      return DIGIT_TO_ROOM[dk];
+    }
+  }
+
+  // 3) Dashes↔dots conversion: "2-4-2"→"2.4.2", "2.4.2"→"2-4-2".
+  //    Run AFTER digit-stripping so we don't prematurely match short codes.
+  const dashToDot = anchoredNorm.replace(/-/g, ".");
+  const dotToDash = anchoredNorm.replace(/\./g, "-");
+  for (const variant of [dashToDot, dotToDash]) {
+    for (const c of ROOM_CODES_BY_LEN) {
+      if (variant.includes(c.toLowerCase())) return c;
+    }
+  }
+
+  // 4) Normalised spoken-digit form on the anchored slice.
   const norm = normalizeCodeTokens(anchored);
   for (const c of ROOM_CODES_BY_LEN) {
     if (norm.includes(c.toLowerCase())) return c;
   }
 
-  // 3) Concatenated digit sequences from Whisper (e.g., "242" → "2.4.2").
-  //    Extract all digit sequences (optionally followed by a/а for 1.3A)
-  //    from the anchored slice AND the normalised form.
+  // 5) Concatenated digit sequences from Whisper (e.g., "242" → "2.4.2").
   const digitSeqs: string[] = [];
   for (const src of [anchored, norm]) {
     const seqs = src.match(/\d{2,4}[aаAА]?/g);
     if (seqs) digitSeqs.push(...seqs);
   }
   for (const seq of digitSeqs) {
-    const key = seq.toLowerCase().replace(/а/g, "а"); // normalise
+    const key = seq.toLowerCase().replace(/а/g, "a");
     for (const dk of DIGIT_ROOM_KEYS) {
       if (key === dk || key.startsWith(dk)) {
         return DIGIT_TO_ROOM[dk];
@@ -590,11 +611,11 @@ export function matchRoomCode(transcript: string): string | null {
     }
   }
 
-  // 4) digit-window: try longer windows first.
-  const digits = norm.replace(/[^\d\s.-]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-  for (let len = Math.min(4, digits.length); len >= 2; len--) {
-    for (let i = 0; i + len <= digits.length; i++) {
-      const win = digits.slice(i, i + len);
+  // 6) Digit-window: split individual digits/numbers and try joining them.
+  const windowDigits = norm.replace(/[^\d\s]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  for (let len = Math.min(4, windowDigits.length); len >= 2; len--) {
+    for (let i = 0; i + len <= windowDigits.length; i++) {
+      const win = windowDigits.slice(i, i + len);
       const candidates = [win.join("."), win.join("-"), win.join("")];
       for (const cand of candidates) {
         const match = ROOM_CODES_BY_LEN.find(c => c.toLowerCase() === cand.toLowerCase());
@@ -603,18 +624,18 @@ export function matchRoomCode(transcript: string): string | null {
     }
   }
 
-  // 5) Single-digit sequences → try digit-to-room mapping on whole transcript
+  // 7) Single-digit sequences on whole transcript → DIGIT_TO_ROOM
   const fullDigitSeqs = lower.match(/\d{2,4}[aаAА]?/g);
   if (fullDigitSeqs) {
     for (const seq of fullDigitSeqs) {
-      const key = seq.toLowerCase();
+      const key = seq.toLowerCase().replace(/а/g, "a");
       for (const dk of DIGIT_ROOM_KEYS) {
         if (key === dk) return DIGIT_TO_ROOM[dk];
       }
     }
   }
 
-  // 6) Final fallback — scan whole transcript literally, longest first.
+  // 8) Final fallback — scan whole transcript literally, longest first.
   for (const c of ROOM_CODES_BY_LEN) {
     if (lower.includes(c.toLowerCase())) return c;
   }
@@ -1178,7 +1199,22 @@ export type ParsedReservation = {
 export function parseVoice(text: string, defaultYear: number, nowDate?: Date): ParsedReservation {
   const now = nowDate || new Date();
   const ctx = { now, year: defaultYear || now.getFullYear() };
-  const raw = text || "";
+
+  // ── Strip Whisper filler words & artifacts before any parsing ──
+  // Whisper outputs these on hesitations, pauses, background noise.
+  let cleaned = (text || "")
+    // Bulgarian filler words (ъъ, ъм, хм, ами, значи, нали, така, де)
+    .replace(/(?<!\p{L})(?:ъ{2,}|ъм+|хм+|ами|значи|нали|така|де)(?!\p{L})/gu, " ")
+    // Repeated punctuation artifacts (... ,, ;; etc.)
+    .replace(/\.{3,}/g, " ")
+    .replace(/[,;]{2,}/g, ",")
+    // Whisper sometimes outputs "..." as a pause marker
+    .replace(/…/g, " ")
+    // Normalise multiple spaces
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const raw = cleaned;
   const s = raw.toLowerCase();
 
   let start: string | null = null;
@@ -1193,11 +1229,17 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     start = parseBGDate(fromTo[1], ctx);
     end   = parseBGDate(fromTo[2], ctx);
 
-    // Range harmonisation: "от 1 до 10 май" — the month is stated only on
-    // the second leg. Re-parse the first leg by borrowing the second
-    // leg's month if the result is suspicious (too far from end).
+    // Range harmonisation: "от 5 до 10 юни" — the month is stated only on
+    // the second leg. If leg1 has NO month of its own, always borrow from
+    // leg2. If both have months, only fix suspicious gaps.
     const leg2MonthMatch = Object.keys(MONTHS).find(mn => fromTo[2].toLowerCase().includes(mn));
-    if (leg2MonthMatch && start && end) {
+    const leg1HasMonth = Object.keys(MONTHS).some(mn => fromTo[1].toLowerCase().includes(mn));
+    if (leg2MonthMatch && !leg1HasMonth && start && end) {
+      // Leg1 is a bare number ("5") — always borrow the month from leg2
+      const retry = parseBGDate(`${fromTo[1]} ${leg2MonthMatch}`, ctx);
+      if (retry) start = retry;
+    } else if (leg2MonthMatch && leg1HasMonth && start && end) {
+      // Both legs have months — only fix if gap is suspicious
       const gapDays = (new Date(end).getTime() - new Date(start).getTime()) / 86400000;
       if (gapDays < 0 || gapDays > 60) {
         const retry = parseBGDate(`${fromTo[1]} ${leg2MonthMatch}`, ctx);
@@ -1223,22 +1265,23 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
       const d1 = parseBGDate(leg1, ctx);
       const d2 = parseBGDate(leg2, ctx);
       if (d2) {
+        const leg2Month = Object.keys(MONTHS).find(mn => leg2.toLowerCase().includes(mn));
+        const leg1HasMonth = Object.keys(MONTHS).some(mn => leg1.toLowerCase().includes(mn));
         // If d1 parsed, use it; if not, borrow month from leg2
         if (d1) {
           start = d1;
           end = d2;
-        } else {
-          const leg2Month = Object.keys(MONTHS).find(mn => leg2.toLowerCase().includes(mn));
-          if (leg2Month) {
-            const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
-            if (retry) { start = retry; end = d2; }
-          }
+        } else if (leg2Month) {
+          const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
+          if (retry) { start = retry; end = d2; }
         }
-        // Range harmonisation
-        if (start && end) {
+        // Range harmonisation: always borrow month if leg1 has no month
+        if (start && end && leg2Month && !leg1HasMonth) {
+          const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
+          if (retry) start = retry;
+        } else if (start && end) {
           const gap = (new Date(end).getTime() - new Date(start).getTime()) / 86400000;
           if (gap < 0 || gap > 60) {
-            const leg2Month = Object.keys(MONTHS).find(mn => leg2.toLowerCase().includes(mn));
             if (leg2Month) {
               const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
               if (retry) start = retry;
@@ -1268,17 +1311,66 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     }
   }
 
+  // Comma-separated range + month: "5, 10 май" or "пети, десети май"
+  // or "пети, десети, май" → May 5 to May 10.
+  // Whisper loves inserting commas between everything.
+  if (!start && !end) {
+    const monthAltComma = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    // Digit form: "5, 10 май" or "5, 10, май"
+    const commaRange = s.match(new RegExp(
+      `(?<![\\p{L}\\d])(\\d{1,2})\\s*,\\s*(\\d{1,2})\\s*[,]?\\s*(${monthAltComma})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+    ));
+    if (commaRange) {
+      const d1 = parseInt(commaRange[1], 10);
+      const d2 = parseInt(commaRange[2], 10);
+      const mn = MONTHS[commaRange[3]];
+      const yr = commaRange[4] ? parseInt(commaRange[4], 10) : ctx.year;
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2 && mn) {
+        start = toIso(yr, mn, d1);
+        end   = toIso(yr, mn, d2);
+      }
+    }
+    // Word form: "пети, десети май" or "пети, десети, май"
+    if (!start && !end) {
+      const ordAlt = Object.keys(ORDINALS).sort((a, b) => b.length - a.length).join("|");
+      const commaWordRange = s.match(new RegExp(
+        `(?<![\\p{L}])(${ordAlt})\\s*,\\s*(${ordAlt})\\s*[,]?\\s*(${monthAltComma})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+      ));
+      if (commaWordRange) {
+        const d1 = ORDINALS[commaWordRange[1]];
+        const d2 = ORDINALS[commaWordRange[2]];
+        const mn = MONTHS[commaWordRange[3]];
+        const yr = commaWordRange[4] ? parseInt(commaWordRange[4], 10) : ctx.year;
+        if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2 && mn) {
+          start = toIso(yr, mn, d1);
+          end   = toIso(yr, mn, d2);
+        }
+      }
+    }
+  }
+
   // Two consecutive day-like tokens + month → date range.
   // "пети десети май" or "5 10 май" or "пети десети" (current month).
   // Bulgarian shorthand: first number = start day, second = end day.
+  // IMPORTANT: strip room-code slice first so "стая 11 5 10 май" doesn't
+  // match "11 5" (room + date) instead of "5 10" (date range).
   if (!start && !end) {
+    let dateSearchable = s;
+    // Remove "стая <X>" slices so room digits don't interfere
+    dateSearchable = dateSearchable.replace(/(?<![\p{L}])(стая|апартамент|стаичка|апартаментче|номер)\s+[\p{L}\d\s.\-]+?(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|\d{1,2}\s+\d{1,2})|$)/gu, " ");
+    // Also strip literal room codes
+    for (const c of ROOM_CODES_BY_LEN) {
+      dateSearchable = dateSearchable.split(c.toLowerCase()).join(" ");
+    }
+    dateSearchable = dateSearchable.replace(/\s+/g, " ").trim();
+
     const monthAlt2 = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
     // Build a number-word alternation for ordinals/cardinals 1-31
     const numWordAlt = Object.keys({ ...ORDINALS, ...CARDINALS })
       .filter(k => (ORDINALS[k] ?? CARDINALS[k]) <= 31)
       .sort((a, b) => b.length - a.length).join("|");
     // Pattern: <numOrDigit> <numOrDigit> [<month>]
-    const twoNumMonth = s.match(new RegExp(
+    const twoNumMonth = dateSearchable.match(new RegExp(
       `(?<![\\p{L}\\d])(\\d{1,2}|${numWordAlt})\\s+(\\d{1,2}|${numWordAlt})(?:\\s+(${monthAlt2}))?(?![\\p{L}])`, "u"
     ));
     if (twoNumMonth) {

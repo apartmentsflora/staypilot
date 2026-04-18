@@ -10,7 +10,10 @@ import { createBeds24Booking } from "@/lib/beds24";
 const ReservationInput = z.object({
   guestName: z.string().trim().min(1, "guestName is required").max(120),
   phone: z.string().trim().max(40).optional().default(""),
-  email: z.string().trim().email().optional().nullable(),
+  email: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+    z.string().trim().email().nullable().optional()
+  ),
   roomCode: z.string().trim().min(1, "roomCode is required"),
   startDate: z.string().min(8, "startDate is required"),
   endDate: z.string().min(8, "endDate is required"),

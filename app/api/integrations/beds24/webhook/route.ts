@@ -3,24 +3,30 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
-import { fetchBeds24Bookings } from "@/lib/beds24";
 
 // Beds24 → StayPilot webhook.
+//
+// CRITICAL: Beds24 inventory webhooks have a short timeout (~5s). Our handler
+// MUST return 200 OK immediately and process the sync in the background.
+// If we block on the Beds24 API fetch + DB upserts, Beds24 considers the
+// webhook failed and stops sending subsequent notifications.
 //
 // Beds24 sends TWO types of webhook payload:
 //
 // 1. **Inventory webhook** (SYNC_ROOM) — fired on new bookings, modifications,
 //    cancellations, and availability/price changes. Payload is minimal:
 //      {"roomId":"671001","propId":"322955","ownerId":"...","action":"SYNC_ROOM"}
-//    We respond by fetching the latest bookings for that room from the Beds24 API
-//    and upserting them into our database.
+//    We respond immediately with 200, then fetch the latest bookings for that
+//    room from the Beds24 API and upsert them into our database in the background.
 //
 // 2. **Legacy full-payload webhook** (for backward compat) — contains full booking
 //    details: bookingId, arrival, departure, firstName, lastName, etc.
-//    Processed inline without an API call.
+//    Processed inline without an API call (fast enough to respond in time).
 //
 // Public endpoint (no session) because Beds24 servers call it directly.
 // Optionally authenticated with a shared secret.
+
+const BEDS24_BASE = "https://beds24.com/api/v2";
 
 export async function POST(req: Request) {
   // Optional shared secret check
@@ -44,24 +50,30 @@ export async function POST(req: Request) {
   } catch (e) { console.error("[beds24 webhook] log received failed", e); }
 
   // ── Detect SYNC_ROOM inventory webhook ──────────────────────────────────
-  // Beds24 inventory webhooks send: {roomId, propId, ownerId, action}
-  // The field names differ from the booking API: "propId" not "propertyId".
   if (payload?.action === "SYNC_ROOM") {
-    return handleSyncRoom(payload);
+    // Fire background processing — DO NOT await.
+    // Return 200 immediately so Beds24 doesn't time out.
+    processSyncRoom(payload).catch((e) =>
+      console.error("[beds24 webhook] background SYNC_ROOM failed", e)
+    );
+    return NextResponse.json({ ok: true, action: "SYNC_ROOM", accepted: true });
   }
 
   // ── Legacy full-payload webhook (backward compat) ───────────────────────
   return handleFullPayload(payload);
 }
 
-// ── SYNC_ROOM handler ─────────────────────────────────────────────────────
-// Receives minimal notification, fetches bookings from Beds24 API, upserts.
-async function handleSyncRoom(payload: any) {
+// ── Background SYNC_ROOM processor ───────────────────────────────────────
+// Runs AFTER the 200 response is sent. Fetches bookings from Beds24 API for
+// ONLY the specific property that triggered the webhook (not both), then
+// upserts matching bookings into the database.
+async function processSyncRoom(payload: any) {
   const propId = Number(payload.propId || payload.propertyId);
   const roomId = Number(payload.roomId);
 
   if (!propId || !roomId) {
-    return NextResponse.json({ ok: true, action: "SYNC_ROOM", applied: false, reason: "missing propId/roomId" });
+    await logSync("PROCESSED", { action: "SYNC_ROOM", applied: false, reason: "missing propId/roomId" });
+    return;
   }
 
   // Map to internal room code
@@ -70,32 +82,27 @@ async function handleSyncRoom(payload: any) {
   const roomCode = dynamicMap[key] || null;
   if (!roomCode) {
     await logSync("PROCESSED", { action: "SYNC_ROOM", key, mapped: false });
-    return NextResponse.json({ ok: true, action: "SYNC_ROOM", mapped: false, key });
+    return;
   }
 
   const { data: room } = await supabaseAdmin
     .from("Room").select("id").eq("code", roomCode).maybeSingle();
   if (!room) {
-    return NextResponse.json({ ok: true, action: "SYNC_ROOM", mapped: false, roomCode });
+    await logSync("PROCESSED", { action: "SYNC_ROOM", mapped: false, roomCode });
+    return;
   }
 
-  // Fetch current bookings for this property from Beds24 API.
-  // Use a wide window: today → 12 months out, to capture any changes.
+  // Fetch bookings for ONLY this property (not both) — much faster.
   const today = new Date().toISOString().slice(0, 10);
   const future = new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 10);
 
-  let bookings: any[] | null;
+  let bookings: any[];
   try {
-    bookings = await fetchBeds24Bookings(today, future);
+    bookings = await fetchPropertyBookings(propId, today, future);
   } catch (e: any) {
     console.error("[beds24 webhook] SYNC_ROOM fetch failed", e);
     await logSync("ERROR", { action: "SYNC_ROOM", roomCode, error: e.message });
-    return NextResponse.json({ ok: false, error: "fetch failed" }, { status: 502 });
-  }
-
-  if (!bookings) {
-    await logSync("ERROR", { action: "SYNC_ROOM", roomCode, error: "null response" });
-    return NextResponse.json({ ok: false, error: "fetch returned null" }, { status: 502 });
+    return;
   }
 
   // Filter to only bookings for this specific room
@@ -160,8 +167,6 @@ async function handleSyncRoom(payload: any) {
         await supabaseAdmin.from("Reservation").update(row).eq("id", existing.id);
         updated++;
       } else {
-        // Use upsert with onConflict to handle race conditions when
-        // multiple SYNC_ROOM webhooks arrive simultaneously.
         await supabaseAdmin.from("Reservation").upsert(
           { ...row, source: "Beds24", externalRef },
           { onConflict: "externalRef" }
@@ -182,15 +187,64 @@ async function handleSyncRoom(payload: any) {
     action: "SYNC_ROOM", roomCode, key,
     found: roomBookings.length, inserted, updated, cancelled, errors,
   });
+}
 
-  return NextResponse.json({
-    ok: true, action: "SYNC_ROOM", roomCode,
-    found: roomBookings.length, inserted, updated, cancelled, errors,
+// ── Fetch bookings for a SINGLE property ─────────────────────────────────
+// Unlike fetchBeds24Bookings() in lib/beds24.ts (which fetches both properties),
+// this only queries the one property that triggered the webhook — ~2x faster.
+async function fetchPropertyBookings(propertyId: number, from: string, to: string): Promise<any[]> {
+  // Get access token
+  const { data: cred } = await supabaseAdmin
+    .from("IntegrationCredential").select("values").eq("provider", "beds24").maybeSingle();
+  const vals = cred?.values as any;
+  const refresh = vals?.refreshToken || vals?.apiKey;
+  if (!refresh) throw new Error("no Beds24 credential");
+
+  let token = vals?.accessToken;
+  // Check if cached token is still valid (5-min margin)
+  if (token && vals?.accessTokenExpiresAt) {
+    const exp = new Date(vals.accessTokenExpiresAt).getTime();
+    if (exp - Date.now() < 5 * 60_000) token = null;
+  }
+  if (!token) {
+    const r = await fetch(`${BEDS24_BASE}/authentication/token`, {
+      method: "GET",
+      headers: { refreshToken: refresh, accept: "application/json" },
+    });
+    if (!r.ok) throw new Error(`token exchange failed: ${r.status}`);
+    const body = await r.json();
+    token = body.token;
+    if (!token) throw new Error("no token in response");
+    // Cache the new token
+    const expiresIn = typeof body.expiresIn === "number" ? body.expiresIn : 82800;
+    try {
+      await supabaseAdmin.from("IntegrationCredential").upsert({
+        provider: "beds24",
+        values: { ...vals, accessToken: token, accessTokenExpiresAt: new Date(Date.now() + expiresIn * 1000).toISOString() },
+        updatedAt: new Date().toISOString(),
+      }, { onConflict: "provider" });
+    } catch { /* non-fatal */ }
+  }
+
+  const url = new URL(`${BEDS24_BASE}/bookings`);
+  url.searchParams.set("propertyId", String(propertyId));
+  url.searchParams.set("departureFrom", from);
+  url.searchParams.set("arrivalTo", to);
+  url.searchParams.set("includeInvoiceItems", "false");
+  url.searchParams.set("includeGuests", "true");
+
+  const r = await fetch(url.toString(), {
+    method: "GET",
+    headers: { token, accept: "application/json" },
   });
+  if (!r.ok) throw new Error(`bookings fetch failed: ${r.status}`);
+  const body = await r.json().catch(() => null);
+  return Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : [];
 }
 
 // ── Legacy full-payload handler ───────────────────────────────────────────
 // Handles webhooks that include full booking details directly in the payload.
+// This is fast (no API calls) so it can respond synchronously.
 async function handleFullPayload(payload: any) {
   const dynamicMap = await loadBeds24Map();
   const key = payload?.propertyId && payload?.roomId

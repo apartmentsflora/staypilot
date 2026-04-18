@@ -543,6 +543,30 @@ export function matchRoomCode(transcript: string): string | null {
     if (anchored.includes(c.toLowerCase())) return c;
   }
 
+  // 1b) Whisper often writes "2-4-2" or "4-1" with dashes. Try replacing
+  //     dashes with dots (and vice-versa) to match room codes like "2.4.2".
+  const dashToDot = anchored.replace(/-/g, ".");
+  const dotToDash = anchored.replace(/\./g, "-");
+  for (const variant of [dashToDot, dotToDash]) {
+    for (const c of ROOM_CODES_BY_LEN) {
+      if (variant.includes(c.toLowerCase())) return c;
+    }
+  }
+
+  // 1c) Try stripping all separators from digit-dash-dot sequences and
+  //     matching via DIGIT_TO_ROOM: "2-4-2" → "242" → "2.4.2"
+  const rawDigitSeqs = anchored.match(/\d[\d.\-]+\d[aаAА]?/g);
+  if (rawDigitSeqs) {
+    for (const seq of rawDigitSeqs) {
+      const stripped = seq.replace(/[.\-]/g, "").toLowerCase();
+      for (const dk of DIGIT_ROOM_KEYS) {
+        if (stripped === dk || stripped.startsWith(dk)) {
+          return DIGIT_TO_ROOM[dk];
+        }
+      }
+    }
+  }
+
   // 2) normalised spoken-digit form on the anchored slice.
   const norm = normalizeCodeTokens(anchored);
   for (const c of ROOM_CODES_BY_LEN) {
@@ -1221,6 +1245,25 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
             }
           }
         }
+      }
+    }
+  }
+
+  // Dash-separated range + month: "10-12 май" → May 10 to May 12.
+  // Very common in Whisper output and casual Bulgarian: N-N <month>.
+  if (!start && !end) {
+    const monthAltDash = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    const dashRange = s.match(new RegExp(
+      `(?<![\\p{L}\\d])(\\d{1,2})\\s*[-–—]\\s*(\\d{1,2})\\s+(${monthAltDash})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+    ));
+    if (dashRange) {
+      const d1 = parseInt(dashRange[1], 10);
+      const d2 = parseInt(dashRange[2], 10);
+      const mn = MONTHS[dashRange[3]];
+      const yr = dashRange[4] ? parseInt(dashRange[4], 10) : ctx.year;
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && mn) {
+        start = toIso(yr, mn, d1);
+        end   = toIso(yr, mn, d2);
       }
     }
   }

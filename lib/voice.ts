@@ -51,6 +51,11 @@ const CARDINALS: Record<string, number> = {
   "осемдесет": 80, "осемдесе": 80,
   "деветдесет": 90, "деветдесе": 90,
   "сто": 100,
+  // Slang / colloquial number words
+  "стотачка": 100, "стотак": 100, "стотарка": 100,
+  "двеста": 200, "двесте": 200,
+  "триста": 300,
+  "петстотин": 500,
 };
 
 // Ordinal numbers 1-31 (day names + spoken room parts).
@@ -272,6 +277,43 @@ export function parseBGDate(phrase: string, ctx: { now: Date; year: number }): s
     return toIso(ctx.now.getFullYear(), ctx.now.getMonth() + 1, 15);
   }
 
+  // "края на <month>" / "началото на <month>" / "средата на <month>"
+  // — resolves to last/first/15th day of a named month.
+  const periodMonthNames = Object.keys(MONTHS).sort((a, b) => b.length - a.length);
+  const monthAltForPeriod = periodMonthNames.join("|");
+  const periodMonth = s.match(new RegExp(
+    `(?:в\\s+)?(?:края|накрая|в\\s+края)\\s+на\\s+(${monthAltForPeriod})`, "u"
+  ));
+  if (periodMonth && MONTHS[periodMonth[1]]) {
+    const m = MONTHS[periodMonth[1]];
+    const y = ctx.year;
+    const lastDay = new Date(y, m, 0).getDate(); // last day of month
+    return toIso(y, m, lastDay);
+  }
+  const periodMonthStart = s.match(new RegExp(
+    `(?:в\\s+)?(?:началото|в\\s+началото)\\s+на\\s+(${monthAltForPeriod})`, "u"
+  ));
+  if (periodMonthStart && MONTHS[periodMonthStart[1]]) {
+    return toIso(ctx.year, MONTHS[periodMonthStart[1]], 1);
+  }
+  const periodMonthMid = s.match(new RegExp(
+    `(?:в\\s+)?(?:средата|в\\s+средата)\\s+на\\s+(${monthAltForPeriod})`, "u"
+  ));
+  if (periodMonthMid && MONTHS[periodMonthMid[1]]) {
+    return toIso(ctx.year, MONTHS[periodMonthMid[1]], 15);
+  }
+
+  // "другата/идната/следващата седмица" — resolves to next Monday.
+  if (/(?:друг(?:ата|ия)|идн(?:ата|ия)|следващ(?:ата|ия))\s+седмица/u.test(s)) {
+    const today = ctx.now.getDay(); // 0=Sun
+    const delta = today === 0 ? 1 : (8 - today); // next Monday
+    return isoOf(addDays(ctx.now, delta));
+  }
+  // "тази седмица" — resolves to today (you're already in the week)
+  if (/тази\s+седмица/u.test(s)) {
+    return isoOf(ctx.now);
+  }
+
   // Bulgarian holidays — both fixed and computed (Easter).
   for (const h of FIXED_HOLIDAYS) {
     if (h.rx.test(s)) {
@@ -396,6 +438,33 @@ export const ALL_ROOM_CODES = [
   "41.0.1", "41.0.2", "1.1", "1.2", "2.2", "41-2", "3.1", "4.1", "4.2",
 ];
 
+// Whisper outputs numbers as digits — "242" not "две четири две".
+// This table maps concatenated digit sequences to their room codes.
+// Longest keys first in iteration so "4101" matches before "41".
+const DIGIT_TO_ROOM: Record<string, string> = {
+  "4101": "41.0.1",
+  "4102": "41.0.2",
+  "3901": "39.0.1",
+  "241":  "2.4.1",
+  "242":  "2.4.2",
+  "243":  "2.4.3",
+  "412":  "41-2",
+  "13a":  "1.3A",
+  "13а":  "1.3A",   // Cyrillic "а"
+  "11":   "1.1",
+  "12":   "1.2",
+  "13":   "1.3",
+  "15":   "1.5",
+  "22":   "2.2",
+  "25":   "2.5",
+  "31":   "3.1",
+  "41":   "4.1",
+  "42":   "4.2",
+  "55":   "5.5",
+};
+// Sorted longest-first for greedy matching
+const DIGIT_ROOM_KEYS = Object.keys(DIGIT_TO_ROOM).sort((a, b) => b.length - a.length);
+
 // Decades that must be evaluated as "X and Y" or "X alone".
 const DECADE_TOKENS: Array<{ re: RegExp; val: number }> = [
   { re: /трид(?:есет|ейсет|ийсет)/u, val: 30 },
@@ -480,7 +549,24 @@ export function matchRoomCode(transcript: string): string | null {
     if (norm.includes(c.toLowerCase())) return c;
   }
 
-  // 3) digit-window: try longer windows first.
+  // 3) Concatenated digit sequences from Whisper (e.g., "242" → "2.4.2").
+  //    Extract all digit sequences (optionally followed by a/а for 1.3A)
+  //    from the anchored slice AND the normalised form.
+  const digitSeqs: string[] = [];
+  for (const src of [anchored, norm]) {
+    const seqs = src.match(/\d{2,4}[aаAА]?/g);
+    if (seqs) digitSeqs.push(...seqs);
+  }
+  for (const seq of digitSeqs) {
+    const key = seq.toLowerCase().replace(/а/g, "а"); // normalise
+    for (const dk of DIGIT_ROOM_KEYS) {
+      if (key === dk || key.startsWith(dk)) {
+        return DIGIT_TO_ROOM[dk];
+      }
+    }
+  }
+
+  // 4) digit-window: try longer windows first.
   const digits = norm.replace(/[^\d\s.-]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
   for (let len = Math.min(4, digits.length); len >= 2; len--) {
     for (let i = 0; i + len <= digits.length; i++) {
@@ -493,7 +579,18 @@ export function matchRoomCode(transcript: string): string | null {
     }
   }
 
-  // 4) Final fallback — scan whole transcript literally, longest first.
+  // 5) Single-digit sequences → try digit-to-room mapping on whole transcript
+  const fullDigitSeqs = lower.match(/\d{2,4}[aаAА]?/g);
+  if (fullDigitSeqs) {
+    for (const seq of fullDigitSeqs) {
+      const key = seq.toLowerCase();
+      for (const dk of DIGIT_ROOM_KEYS) {
+        if (key === dk) return DIGIT_TO_ROOM[dk];
+      }
+    }
+  }
+
+  // 6) Final fallback — scan whole transcript literally, longest first.
   for (const c of ROOM_CODES_BY_LEN) {
     if (lower.includes(c.toLowerCase())) return c;
   }
@@ -543,38 +640,110 @@ function extractPhone(text: string): string | null {
   return null;
 }
 
+// Stop words that should never be treated as names (lowercase).
+const NAME_STOP = new Set<string>(
+  [
+    ...Object.keys(MONTHS),
+    ...Object.keys(WEEKDAYS),
+    // Workflow / reservation keywords
+    "резервация", "резервирай", "резервацията", "стая", "апартамент", "стаичка",
+    "апартаментче", "номер", "телефон", "тел", "бележка", "коментар", "забележка",
+    "следващия", "следващата", "следващите", "другия", "другата", "идния", "идната",
+    "нощувка", "нощувки", "нощи", "нощ", "дни", "ден", "дена", "седмица", "седмици",
+    "възрастни", "възрастен", "деца", "дете", "души", "гости", "човек", "човека",
+    "записвам", "запиша", "запиши", "записва",
+    // Date-related
+    "днес", "утре", "вдругиден", "вчера", "от", "до", "за", "на", "със", "в",
+    "пристигане", "заминаване", "чекин", "чекаут",
+    // Dictation fillers
+    "ами", "значи", "нали", "така", "нека", "де", "бе", "ве", "абе", "тъй", "моля",
+    // Verbs
+    "пристига", "заминава", "настанява", "идва", "тръгва", "напуска", "освобождава",
+    "казва", "името", "гост", "госта", "гостът", "клиент", "клиента", "клиентът",
+    // Number words that Whisper might produce
+    "един", "една", "едно", "два", "две", "три", "четири", "пет", "шест",
+    "седем", "осем", "девет", "десет", "двама", "трима",
+    // Source words
+    "booking", "beds24", "директна", "уебсайт", "airbnb",
+    // VIP — must not be treated as a name
+    "vip",
+    // Price
+    "лева", "лв", "евро", "цена", "по",
+  ].map(s => s.toLowerCase())
+);
+
+function isNameCandidate(word: string): boolean {
+  if (word.length < 2) return false;
+  if (NAME_STOP.has(word.toLowerCase())) return false;
+  if (/^\d+$/.test(word)) return false;
+  // Must be a letter-only token (allow Cyrillic + Latin)
+  if (!/^[\p{L}]+$/u.test(word)) return false;
+  return true;
+}
+
 function extractName(text: string): string | null {
-  // Phrase forms — most specific first. Explicitly capture 1-3 capitalised tokens.
-  const patterns: RegExp[] = [
+  // ── Phase 1: Capitalised anchored patterns (works for both SpeechRecog and well-formed Whisper) ──
+  const capsPatterns: RegExp[] = [
     /(?:името\s+е|на\s+името\s+на|казва\s+се|записвам|запиша|запиши|записва|регистрирай|резервирай\s+за|резервация\s+за|за\s+гост[а]?|за\s+клиент[а]?)\s+([А-ЯA-Z][\p{L}]+(?:\s+[А-ЯA-Z][\p{L}]+){0,2})/u,
     /(?<![\p{L}])гост(?:ът|а)?\s+(?:е\s+)?([А-ЯA-Z][\p{L}]+(?:\s+[А-ЯA-Z][\p{L}]+){0,2})/u,
     /(?<![\p{L}])клиент(?:ът|а)?\s+(?:е\s+)?([А-ЯA-Z][\p{L}]+(?:\s+[А-ЯA-Z][\p{L}]+){0,2})/u,
     /(?<![\p{L}])за\s+([А-ЯA-Z][\p{L}]+(?:\s+[А-ЯA-Z][\p{L}]+))/u,
   ];
-  for (const re of patterns) {
+  for (const re of capsPatterns) {
     const m = text.match(re);
     if (m) return m[1].trim();
   }
-  // Fallback: first 1-2 capitalised tokens that aren't months/weekdays/stopwords/fillers.
-  const STOP = new Set<string>(
-    [
-      ...Object.keys(MONTHS),
-      ...Object.keys(WEEKDAYS),
-      // Workflow words
-      "резервация", "резервирай", "резервацията", "стая", "апартамент", "телефон", "тел",
-      "бележка", "коментар", "забележка",
-      "следващия", "следващата", "следващите", "другия", "другата", "идния", "идната",
-      // Dictation fillers
-      "ами", "значи", "нали", "така", "нека", "де", "бе", "ве", "абе", "тъй", "моля",
-      // Common verbs that webkitSpeech may capitalise mid-sentence
-      "пристига", "заминава", "настанява", "идва", "тръгва", "напуска", "освобождава",
-    ].map(s => s.toLowerCase())
-  );
-  const caps = text.split(/\s+/).filter(w =>
-    w.length > 2 && /^[А-ЯA-Z][\p{L}]*$/u.test(w) && !STOP.has(w.toLowerCase())
-  );
+
+  // ── Phase 2: Case-insensitive anchored patterns (Whisper often lowercases names) ──
+  const ciPatterns: RegExp[] = [
+    /(?:името\s+е|на\s+името\s+на|казва\s+се|записвам|запиша|запиши|записва|регистрирай|резервирай\s+за|резервация\s+за|за\s+гост[а]?|за\s+клиент[а]?)\s+([\p{L}]{2,}(?:\s+[\p{L}]{2,}){0,2})/iu,
+    /(?<![\p{L}])гост(?:ът|а)?\s+(?:е\s+)?([\p{L}]{2,}(?:\s+[\p{L}]{2,}){0,2})/iu,
+    /(?<![\p{L}])клиент(?:ът|а)?\s+(?:е\s+)?([\p{L}]{2,}(?:\s+[\p{L}]{2,}){0,2})/iu,
+  ];
+  for (const re of ciPatterns) {
+    const m = text.match(re);
+    if (m) {
+      // Verify captured words are actual name candidates, not stop words
+      const words = m[1].trim().split(/\s+/).filter(isNameCandidate);
+      if (words.length >= 1) {
+        // Title-case the result since Whisper may have lowercased it
+        return words.slice(0, 2).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+      }
+    }
+  }
+
+  // ── Phase 3: Capitalised tokens fallback (original approach) ──
+  // Strip trailing punctuation (commas, periods, etc.) before checking —
+  // Whisper often inserts commas: "Иван Петров, 5 май..."
+  const caps = text.split(/\s+/)
+    .map(w => w.replace(/[,.:;!?]+$/, ""))
+    .filter(w =>
+      w.length > 2 && /^[А-ЯA-Z][\p{L}]*$/u.test(w) && !NAME_STOP.has(w.toLowerCase())
+    );
   if (caps.length >= 2) return caps[0] + " " + caps[1];
   if (caps.length === 1) return caps[0];
+
+  // ── Phase 4: Leading name heuristic for Whisper ──
+  // If transcript starts with "за <name> <name>" (case-insensitive), extract it.
+  const forName = text.match(/^(?:за\s+)([\p{L}]{2,})\s+([\p{L}]{2,})/iu);
+  if (forName && isNameCandidate(forName[1]) && isNameCandidate(forName[2])) {
+    return [forName[1], forName[2]].map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+  }
+
+  // ── Phase 5: First two non-stop words at start of transcript ──
+  // Whisper often puts the name first: "Иван Петров, пети май до десети май..."
+  // or "иван петров стая 242 5 до 10 май"
+  const firstWords = text.split(/[\s,]+/).slice(0, 4);
+  const nameCandidates = firstWords.filter(isNameCandidate);
+  if (nameCandidates.length >= 2) {
+    // Check that the first two candidates are at the very beginning
+    const idx0 = firstWords.indexOf(nameCandidates[0]);
+    const idx1 = firstWords.indexOf(nameCandidates[1]);
+    if (idx0 <= 1 && idx1 <= 2 && idx1 === idx0 + 1) {
+      return nameCandidates.slice(0, 2).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+    }
+  }
+
   return null;
 }
 
@@ -603,11 +772,91 @@ function extractGuestCount(text: string): number | null {
   const digitWithUnit = s.match(/(?<![\p{L}])за\s+(\d{1,2})\s+(души|гости|човека|човек)(?![\p{L}])/u);
   if (digitWithUnit) return parseInt(digitWithUnit[1], 10);
 
-  // 4) Idiomatic lexemes.
+  // 4) "за N" with bare digit — only if N is 1-9 and not followed by a
+  //    duration/date word (нощ/ден/седмица/месец) that would make it a
+  //    time expression instead.
+  const bareDigit = s.match(/(?<![\p{L}])за\s+(\d)\s*(?![\p{L}\d]|нощ|ден|дни|дена|седмиц|месец)/u);
+  if (bareDigit) {
+    const n = parseInt(bareDigit[1], 10);
+    if (n >= 1 && n <= 9) return n;
+  }
+
+  // 5) Definite-article forms: "двамата", "тримата", "четиримата" etc.
+  if (/(?<![\p{L}])(двамата|двоицата)(?![\p{L}])/u.test(s)) return 2;
+  if (/(?<![\p{L}])(тримата|троицата)(?![\p{L}])/u.test(s)) return 3;
+  if (/(?<![\p{L}])четиримата(?![\p{L}])/u.test(s)) return 4;
+  if (/(?<![\p{L}])петимата(?![\p{L}])/u.test(s)) return 5;
+  if (/(?<![\p{L}])шестимата(?![\p{L}])/u.test(s)) return 6;
+
+  // 6) Bare "двама/трима/..." without "за" prefix — common in casual speech
+  if (/(?<![\p{L}])(двама|двоица)(?![\p{L}])/u.test(s) && !/за\s+(двама|двоица)/u.test(s)) return 2;
+  if (/(?<![\p{L}])(трима|троица)(?![\p{L}])/u.test(s) && !/за\s+(трима|троица)/u.test(s)) return 3;
+  if (/(?<![\p{L}])четирима(?![\p{L}])/u.test(s) && !/за\s+четирима/u.test(s)) return 4;
+  if (/(?<![\p{L}])петима(?![\p{L}])/u.test(s) && !/за\s+петима/u.test(s)) return 5;
+
+  // 7) Idiomatic lexemes.
   if (/(?<![\p{L}])(сам(?:ичък|ичка|а)?)(?![\p{L}])/u.test(s)) return 1;
   if (/(?<![\p{L}])(двойка|чифт|двойката)(?![\p{L}])/u.test(s)) return 2;
+  // "мъж и жена", "аз и жена ми", "аз и мъжът ми", "аз и приятелката ми"
+  if (/мъж\s+и\s+жена/u.test(s)) return 2;
+  if (/аз\s+и\s+(?:жена|мъж(?:ът|а)?|приятел(?:ка)?(?:та)?)\s+ми/u.test(s)) return 2;
+  // "ще бъдем N" / "ние сме N" / "ще сме N"
+  const weBe = s.match(/(?:ще\s+(?:бъдем|сме)|ние\s+сме)\s+([\p{L}\d]+)(?![\p{L}])/u);
+  if (weBe) {
+    const n = parseNumberLike(weBe[1]);
+    if (n != null && n >= 1 && n <= 20) return n;
+  }
   if (/(?<![\p{L}])семейство(?![\p{L}])/u.test(s)) return 4;
   if (/(?<![\p{L}])компания(?![\p{L}])/u.test(s)) return 6;
+
+  return null;
+}
+
+function extractChildren(text: string): number | null {
+  const s = text.toLowerCase();
+
+  // "без деца" / "няма деца" → 0
+  if (/(?<![\p{L}])(?:без|няма)\s+дец[аи](?![\p{L}])/u.test(s)) return 0;
+
+  // "с N дете/деца" — digit form ("с 2 деца")
+  // Allow optional adjective (малки, големи, etc.) between number and деца
+  const digitKids = s.match(/(?<![\p{L}])(?:с|със)\s+(\d{1,2})\s+(?:малки\s+|големи\s+)?(?:дет[еа]|дец[аи])(?![\p{L}])/u);
+  if (digitKids) return Math.min(10, parseInt(digitKids[1], 10));
+
+  // "с <spelled> [малки] дете/деца" — e.g., "с две малки деца", "с едно дете"
+  const spokenKids = s.match(/(?<![\p{L}])(?:с|със)\s+([\p{L}]+)\s+(?:малки\s+|големи\s+)?(?:дет[еа]|дец[аи])(?![\p{L}])/u);
+  if (spokenKids) {
+    const n = parseNumberLike(spokenKids[1]);
+    if (n != null && n >= 0 && n <= 10) return n;
+  }
+
+  // "N [малки] деца" without "с" prefix (Whisper may omit it)
+  const bareDigitKids = s.match(/(?<![\p{L}])(\d{1,2})\s+(?:малки\s+|големи\s+)?(?:дет[еа]|дец[аи])(?![\p{L}])/u);
+  if (bareDigitKids) return Math.min(10, parseInt(bareDigitKids[1], 10));
+
+  // "<spelled> [малки] дете/деца" without prefix
+  const bareSpokenKids = s.match(/(?<![\p{L}])(едно|една|две|два|три|четири|пет|шест)\s+(?:малки\s+|големи\s+)?(?:дет[еа]|дец[аи])(?![\p{L}])/u);
+  if (bareSpokenKids) {
+    const n = parseNumberLike(bareSpokenKids[1]);
+    if (n != null) return n;
+  }
+
+  // "едно дете" standalone
+  if (/(?<![\p{L}])(?:едно|1)\s+дете(?![\p{L}])/u.test(s)) return 1;
+
+  // Adults+children compound: "двама възрастни и две деца"
+  const compound = s.match(/(?:и\s+)([\p{L}\d]+)\s+(?:малки\s+|големи\s+)?(?:дет[еа]|дец[аи])(?![\p{L}])/u);
+  if (compound) {
+    const n = parseNumberLike(compound[1]);
+    if (n != null && n >= 0 && n <= 10) return n;
+  }
+
+  // "с дете" / "с бебе" / "с малкия" / "с малката" / "с новородено" → 1 child
+  if (/(?<![\p{L}])(?:с|със)\s+(?:дете|бебе|новороден[оа]?|малко\s+дете|малкия|малката|хлапе(?:то)?)(?![\p{L}])/u.test(s)) return 1;
+  // "дете" / "бебе" / "новородено" alone in a reservation context
+  if (/(?<![\p{L}])(?:и\s+)?(?:едно\s+)?(?:дете|бебе|новороден[оа]?)(?![\p{L}])/u.test(s)) return 1;
+  // "с децата" (definite article, implies 2+ children — default 2)
+  if (/(?<![\p{L}])(?:с|със)\s+децата(?![\p{L}])/u.test(s)) return 2;
 
   return null;
 }
@@ -628,27 +877,47 @@ function extractEmail(text: string): string | null {
 function extractPricePerNight(text: string): number | null {
   const s = text.toLowerCase();
   // "по 80 лева на нощ", "по осемдесет евро", "за 120 лв на нощ"
-  const re = /(?:по|за|на\s+цена)\s+([\p{L}\d\s]+?)\s*(лв|лева|лв\.|евро|eur|€)(?:\s+(?:на|за)\s+(?:нощ|вечер|ден))?/u;
-  const m = s.match(re);
-  if (!m) return null;
-  const n = parseNumberLike(m[1].trim());
-  if (n == null || n < 1 || n > 5000) return null;
-  return n;
+  // IMPORTANT: "за" is too common ("за двама", "за Иван") — only allow it
+  // when immediately followed by a number/price-word, not arbitrary text.
+  const patterns: RegExp[] = [
+    // "по N лева/евро" — most common and unambiguous price form
+    /(?<![\p{L}])по\s+([\p{L}\d]+(?:\s+и\s+[\p{L}\d]+)?)\s*(лв|лева|лв\.|евро|eur|€)(?:\s+(?:на|за)\s+(?:нощ|вечер|ден))?/u,
+    // "цена N лева" / "на цена N лева"
+    /(?:на\s+)?цена(?:та)?\s+(?:е\s+)?([\p{L}\d]+(?:\s+и\s+[\p{L}\d]+)?)\s*(лв|лева|лв\.|евро|eur|€)/u,
+    // "нощувката (е) N лева"
+    /нощувката\s+(?:е\s+)?([\p{L}\d]+(?:\s+и\s+[\p{L}\d]+)?)\s*(лв|лева|лв\.|евро|eur|€)/u,
+    // "за N лева на нощ" — only with "на нощ" suffix to disambiguate
+    /(?<![\p{L}])за\s+(\d{1,4})\s*(лв|лева|лв\.|евро|eur|€)\s+(?:на|за)\s+(?:нощ|вечер|ден)/u,
+    // "N лева на нощ" without anchor
+    /(\d{1,4})\s*(лв|лева|лв\.|евро|eur|€)\s+(?:на|за)\s+(?:нощ|вечер|ден)/u,
+    // "по стотачка/стотак" — slang for 100 leva (no currency suffix needed)
+    /(?<![\p{L}])по\s+(стотачка|стотак|стотарка)(?![\p{L}])/u,
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (m) {
+      const n = parseNumberLike(m[1].trim());
+      if (n != null && n >= 1 && n <= 5000) return n;
+    }
+  }
+  return null;
 }
 
 function extractTime(text: string, kind: "arrival" | "departure"): string | null {
   const s = text.toLowerCase();
   const anchors = kind === "arrival"
-    ? ["час(?:ът|а)?\\s+(?:на\\s+)?пристигане\\s+", "пристига(?:не)?\\s+в\\s+", "чекин\\s+в\\s+", "check[- ]?in\\s+в\\s+", "настанява\\s+се\\s+в\\s+"]
-    : ["час(?:ът|а)?\\s+(?:на\\s+)?заминаване\\s+", "заминава\\s+в\\s+", "чекаут\\s+в\\s+", "check[- ]?out\\s+в\\s+", "напуска\\s+в\\s+"];
+    ? ["час(?:ът|а)?\\s+(?:на\\s+)?пристигане\\s+", "пристига(?:т|не)?\\s+(?:в\\s+)?", "идва(?:т)?\\s+(?:в\\s+)?", "чекин\\s+(?:в\\s+)?", "check[- ]?in\\s+(?:в\\s+|at\\s+)?", "настанява(?:т)?\\s+(?:се\\s+)?(?:в\\s+)?"]
+    : ["час(?:ът|а)?\\s+(?:на\\s+)?заминаване\\s+", "заминава(?:т)?\\s+(?:в\\s+)?", "тръгва(?:т)?\\s+(?:в\\s+)?", "напуска(?:т)?\\s+(?:в\\s+)?", "чекаут\\s+(?:в\\s+)?", "check[- ]?out\\s+(?:в\\s+|at\\s+)?"];
   for (const a of anchors) {
     // First shot: pure digit form HH:MM or HH.MM or just HH immediately
-    // after the anchor. This is the common case in dictation.
-    const reDigit = new RegExp(`${a}(\\d{1,2})(?:[:.](\\d{2}))?(?![\\p{L}\\d])`, "u");
+    // after the anchor. Allows optional "около"/"към" filler before digits.
+    const reDigit = new RegExp(`${a}(?:около\\s+|към\\s+)?(?:в\\s+)?(\\d{1,2})(?:[:.](\\d{2}))?(?:\\s*(?:часа?|ч))?\\s*(следобед|сутринта|вечерта|вечер)?(?![\\p{L}\\d])`, "u");
     const dm = s.match(reDigit);
     if (dm) {
-      const hh = Math.min(23, parseInt(dm[1], 10));
+      let hh = Math.min(23, parseInt(dm[1], 10));
       const mm = dm[2] ? Math.min(59, parseInt(dm[2], 10)) : 0;
+      // Apply PM adjustment for "3 следобед" → 15:00
+      if (dm[3] && /следобед|вечер/u.test(dm[3]) && hh < 12) hh += 12;
       return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
     }
     // Second shot: spelled-out hour ("два следобед", "десет сутринта").
@@ -676,16 +945,23 @@ function extractSpecialRequests(text: string): string | null {
   const rules: Array<[RegExp, string]> = [
     [/(?:искат?|трябва(?:т)?|нужен|нужно|нуждае)\s+(?:им\s+)?(?:от\s+)?паркинг/u, "паркинг"],
     [/паркомясто/u, "паркинг"],
-    [/детск[оа]\s+легло|бебешк[оа]\s+легло|кошар[аи]/u, "детско легло"],
+    [/(?<![\p{L}])паркинг(?![\p{L}])/u, "паркинг"],
+    [/детск[оа]\s+легло|бебешк[оа]\s+легло|кошар[аи]|кошарк[аи]/u, "детско легло"],
+    // Bed type preferences
+    [/раздел(?:ен|н)?[иея]\s+легл[аи]|отделн[иея]\s+легл[аи]|twin\s+beds?|две\s+легл[аи]|сепарирани\s+легл[аи]/iu, "разделни легла"],
+    [/двойно\s+легло|голямо\s+легло|king\s*size|queen\s*size|едно\s+голямо\s+легло|matrimonial/iu, "двойно легло"],
     [/(?:ранен|ранно|по-?рано)\s+(?:чекин|пристигане|настаняване|check[- ]?in)/u, "ранно пристигане"],
     [/(?:късен|късно|по-?късно)\s+(?:чекаут|заминаване|освобождаване|check[- ]?out)/u, "късно освобождаване"],
     [/(?:късно|по-?късно)\s+пристига(?:не)?/u, "късно пристигане"],
     [/със?\s+закуск[аи]|нощувка\s+със?\s+закуск[аи]|B&B|bed\s+(?:and|&)\s+breakfast/iu, "със закуска"],
+    [/(?<![\p{L}])закуск[аи](?![\p{L}])/u, "със закуска"],
     [/(?:полу|полу-)пансион/u, "полупансион"],
-    [/пълен\s+пансион|all[- ]inclusive/u, "пълен пансион"],
+    [/пълен\s+пансион|all[- ]?inclusive|ол\s+инклузив/u, "пълен пансион"],
     [/трансфер\s+от\s+летище|трансфер\s+до\s+летище|airport\s+transfer/u, "трансфер от летище"],
     [/(?:тих[аи]|спокойн[аи])\s+стая/u, "тиха стая"],
+    [/тихо\s+(?:да\s+е|място|стая)/u, "тиха стая"],
     [/(?:с\s+)?гледка\s+(?:към\s+)?(?:море(?:то)?|планина(?:та)?|градина(?:та)?|басейн(?:а|ът)?)/u, "с гледка"],
+    [/(?<![\p{L}])(?:с\s+)?изглед(?![\p{L}])/u, "с гледка"],
     [/(?:не(?:пушач|пушещи)|без\s+пушене)/u, "непушач"],
     [/пушач/u, "пушач"],
     [/(?:с\s+)?куч(?:е|ета)|(?:с\s+)?дом(?:а|ашен)\s+любимец|pet[- ]friendly/u, "с домашен любимец"],
@@ -694,9 +970,131 @@ function extractSpecialRequests(text: string): string | null {
     [/близо\s+до\s+асансьор|на\s+ниски[йя]\s+етаж/u, "на нисък етаж"],
     [/с(?:ъс)?\s+вана|джакузи/u, "стая с джакузи/вана"],
     [/брачна\s+нощ|меден\s+месец|honeymoon/u, "меден месец — специално внимание"],
+    // Extra bed / cot
+    [/допълнително\s+легло|допълнителн[оа]\s+легл[оа]|екстра\s+легло/u, "допълнително легло"],
+    // Balcony / terrace
+    [/(?:с\s+)?(?:балкон|тераса|веранда)(?![\p{L}])/u, "с балкон/тераса"],
+    // AC / heating
+    [/климатик|климатизация|отопление/u, "климатик"],
+    // Fridge / minibar
+    [/хладилник|мини[- ]?бар/u, "хладилник/минибар"],
+    // Accessibility
+    [/достъпн[аи]\s+стая|без\s+стъпала|инвалидн[аи]|за\s+инвалид/u, "достъпна стая"],
+    // Payment method as note
+    [/плащат?\s+(?:в\s+)?брой|кеш|на\s+ръка/u, "плащане в брой"],
+    [/плащат?\s+(?:с\s+)?карт[аи]|безналично|по\s+банков/u, "плащане с карта"],
+    // Wi-Fi (sometimes requested specifically)
+    [/(?<![\p{L}])(?:уай[- ]?фай|wifi|wi[- ]?fi)(?![\p{L}])/iu, "Wi-Fi"],
+    // Transfer
+    [/трансфер(?![\p{L}])/u, "трансфер"],
+    // Payment / deposit notes
+    [/капаро|депозит|предплат[аеи]|задатък/u, "капаро/депозит"],
+    [/(?<![\p{L}])платено(?![\p{L}])/u, "платено"],
+    [/(?<![\p{L}])фактура(?![\p{L}])/u, "нужна фактура"],
+    // Nationality / language notes
+    [/руснац[ии]|руски\s+(?:гости|туристи)|от\s+русия/u, "руски гости"],
+    [/англичан[ии]|английски\s+(?:гости|туристи)|от\s+англия|от\s+великобритания/u, "английски гости"],
+    [/чужденц[ии]|чуждестранн[иея]|от\s+чужбина|foreigners?/iu, "чуждестранни гости"],
+    [/немц[ии]|германц[ии]|от\s+германия/u, "немски гости"],
+    [/не\s+говор[яиъ]т?\s+български/u, "не говорят български"],
+    // Dietary notes
+    [/без\s+глутен|глутенов[аоие]\s+нетърпимост|gluten[- ]?free/iu, "без глутен"],
+    [/веган[ис]?(?:ко)?|vegan/iu, "веганско меню"],
+    [/лактозн[аоие]\s+нетърпимост|без\s+лактоза|lactose[- ]?free/iu, "без лактоза"],
+    [/без\s+месо|растително\s+меню/u, "вегетарианско меню"],
+    // Celebration notes
+    [/рожден\s+ден|рожденен\s+ден|birthday/iu, "рожден ден"],
+    [/годишнин[аи]|anniversary/iu, "годишнина"],
+    [/юбилей/u, "юбилей"],
+    [/изненада|сюрприз|surprise/iu, "изненада за гостите"],
+    // Late arrival / early departure notes
+    [/пристига(?:т)?\s+късно|ще\s+закъсне(?:ят|е)?|идва(?:т)?\s+късно|late\s+(?:check[- ]?in|arrival)/iu, "късно пристигане"],
+    [/рано\s+(?:заминава(?:т)?|тръгва(?:т)?|напуска(?:т)?|замина(?:ват)?)|early\s+(?:check[- ]?out|departure)/iu, "ранно заминаване"],
+    [/рано\s+(?:пристига(?:т)?|идва(?:т)?|настанява(?:т)?)/u, "ранно пристигане"],
+    // VIP — should become a note, never a name
+    [/(?<![\p{L}])VIP(?![\p{L}])/iu, "VIP гост"],
+    // Floor / location preferences
+    [/(?:на\s+)?горни(?:я|ят)?\s+етаж|последен\s+етаж|на\s+последния\s+етаж/u, "горен етаж"],
+    [/(?:на\s+)?долни(?:я|ят)?\s+етаж|партер(?:а|ът)?|на\s+първия?\s+етаж/u, "долен етаж"],
+    [/до\s+асансьор[а]?|близо\s+до\s+асансьор/u, "близо до асансьора"],
+    [/далеч\s+от\s+(?:шум(?:а)?|улица(?:та)?|рецепция(?:та)?)/u, "далеч от шума"],
+    // English-language forms (common in mixed-language booking contexts)
+    [/(?<![\p{L}])parking(?![\p{L}])/iu, "паркинг"],
+    [/breakfast\s+included|with\s+breakfast/iu, "със закуска"],
+    [/(?<![\p{L}])no\s+smoking(?![\p{L}])/iu, "непушач"],
+    [/(?<![\p{L}])sea\s+view(?![\p{L}])/iu, "с гледка към морето"],
+    [/(?<![\p{L}])extra\s+bed(?![\p{L}])/iu, "допълнително легло"],
+    [/(?<![\p{L}])baby\s+cot|(?<![\p{L}])crib(?![\p{L}])/iu, "детско легло"],
+    // ── Connecting / adjacent rooms ──
+    [/свързан[иея]\s+ста[ия]|с\s+вътрешна\s+врата/u, "свързани стаи"],
+    [/съседн[иея]\s+ста[ия]|една\s+до\s+друга/u, "съседни стаи"],
+    // ── Group / event / corporate ──
+    [/фирмен[аоие]|корпоративн[аоие]|бизнес\s+(?:резервация|гости)|служебн[аоие]/u, "фирмена резервация"],
+    [/(?<![\p{L}])груп[аи]|групов[аоие]\s+(?:резервация|настаняване)/u, "групова резервация"],
+    [/сватб[аие]|сватбен[аоие]/u, "сватба"],
+    [/тиймбилдинг|team\s*building/iu, "тиймбилдинг"],
+    [/конференци[яи]|семинар/u, "конференция"],
+    // ── Reservation status ──
+    [/(?<!не)потвърден[аоие]?\s*(?:резервация)?/u, "потвърдена"],
+    [/непотвърден[аоие]?/u, "непотвърдена"],
+    [/чака\s+потвърждение|очаква\s+потвърждение/u, "чака потвърждение"],
+    [/под\s+въпрос|не\s+(?:е\s+)?сигурн[аоие]/u, "под въпрос"],
+    [/може\s+(?:да\s+)?откаж[ае]|вероятно\s+ще\s+откаж/u, "може да откаже"],
+    // ── Returning / regular guest ──
+    [/постоянен\s+(?:клиент|гост)|редовен\s+(?:клиент|гост)/u, "постоянен клиент"],
+    [/идва(?:т)?\s+всяка\s+година|бяха?\s+(?:и\s+)?(?:миналата|ланската)\s+година/u, "редовен гост"],
+    // ── Transport → parking hint ──
+    [/(?:с\s+|пристига(?:т)?\s+с\s+)(?:кола|автомобил|джип|бус|микробус|ван)/u, "с кола — нужен паркинг"],
+    [/(?:от\s+)?летище(?:то)?(?![\p{L}])/u, "от летище — трансфер?"],
+    // ── Price notes (not per-night extraction, just informational) ──
+    [/промоци[яи]|промо\s+цена|акци[яи]/u, "промоция"],
+    [/(?:с\s+)?отстъпк[аи]|намалени[ея]|отбив/u, "с отстъпка"],
+    [/безплатно\s+(?:за\s+)?(?:дет[еа]|бебе|дец[аи])/u, "безплатно за дете"],
+    [/общо\s+\d+\s*(?:лв|лева|евро)/u, "обща цена (виж бележка)"],
+    // ── Cancellation policy ──
+    [/без\s+(?:анулация|отмяна)|невъзвратим[аоие]?|non[- ]?refundable/iu, "без анулация"],
+    [/безплатна\s+(?:отмяна|анулация)|свободна\s+анулация|free\s+cancellation/iu, "безплатна отмяна"],
+    // ── Contact preferences ──
+    [/(?:по\s+)?(?:вайбър|viber)(?![\p{L}])/iu, "контакт: Viber"],
+    [/(?:по\s+)?(?:уотсап|whatsapp|watsap|ватсап)(?![\p{L}])/iu, "контакт: WhatsApp"],
+    [/ще\s+(?:се\s+)?обад[ия]|ще\s+потвърд[ия]|обажда\s+се/u, "ще се обади"],
+    // ── Wheelchair / mobility ──
+    [/(?:инвалидна\s+)?количк[аи](?:\s+за\s+(?:инвалид|възрастен))?|на\s+количка/u, "нужна количка/достъпност"],
+    [/(?:бебешка\s+)?количк[аи]\s+(?:за\s+)?бебе|с\s+количка\s+за\s+бебе/u, "с бебешка количка"],
+    // ── Children specifics ──
+    [/(?<![\p{L}])новороден[оа]?(?![\p{L}])/u, "новородено"],
+    // ── Stay extension ──
+    [/(?:може|вероятно|има\s+вероятност)\s+(?:да\s+)?удълж[аи]т?|ще\s+удълж[аи]т?/u, "може да удължат престоя"],
+    // ── Тихо standalone ──
+    [/(?<![\p{L}])тихо(?![\p{L}])/u, "тиха стая"],
+    // ── Room type preference ──
+    [/единичн[аоие]\s+(?:стая)?/u, "единична стая"],
+    [/двойн[аоие]\s+(?:стая)?/u, "двойна стая"],
+    [/(?<![\p{L}])студио(?![\p{L}])/u, "студио"],
+    [/(?<![\p{L}])сюит(?![\p{L}])/u, "сюит"],
+    // ── Multiple rooms ──
+    [/две\s+ста[ия]|три\s+ста[ия]|няколко\s+ста[ия]|допълнителна\s+стая/u, "няколко стаи"],
   ];
   for (const [rx, label] of rules) if (rx.test(s) && !requests.includes(label)) requests.push(label);
   return requests.length ? requests.join("; ") : null;
+}
+
+function extractSource(text: string): string | null {
+  const s = text.toLowerCase();
+  const sources: Array<[RegExp, string]> = [
+    [/(?:от\s+)?(?:букинг|booking\.?com|booking)(?![\p{L}])/iu, "Booking.com"],
+    [/(?:от\s+)?(?:еърбнб|airbnb|ейр\s*бн\s*б)(?![\p{L}])/iu, "Airbnb"],
+    [/(?:от\s+)?(?:beds\s*24|бедс\s*24)(?![\p{L}])/iu, "Beds24"],
+    [/(?:от\s+)?(?:сайт[а]?|уебсайт[а]?|website|нашия?\s+сайт)(?![\p{L}])/iu, "Уебсайт"],
+    [/директн[аоие]|direct|на\s+живо|по\s+телефон[а]?|обад(?:и|е)\s+се/iu, "Директна"],
+    [/(?:от\s+)?(?:expedia)(?![\p{L}])/iu, "Expedia"],
+    [/(?:от\s+)?(?:hotels\.?com)(?![\p{L}])/iu, "Hotels.com"],
+    [/(?:от\s+)?(?:trivago)(?![\p{L}])/iu, "Trivago"],
+  ];
+  for (const [rx, label] of sources) {
+    if (rx.test(s)) return label;
+  }
+  return null;
 }
 
 function extractDurationNights(text: string): number | null {
@@ -744,11 +1142,13 @@ export type ParsedReservation = {
   end: string | null;
   phone: string | null;
   guests: number | null;
+  children: number | null;
   notes: string | null;
   email: string | null;
   pricePerNight: number | null;
   arrivalTime: string | null;
   departureTime: string | null;
+  source: string | null;
 };
 
 export function parseVoice(text: string, defaultYear: number, nowDate?: Date): ParsedReservation {
@@ -782,6 +1182,81 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     } else if (leg2MonthMatch && !start) {
       const retry = parseBGDate(`${fromTo[1]} ${leg2MonthMatch}`, ctx);
       if (retry) start = retry;
+    }
+  }
+
+  // Bare "X до Y" without "от" — Whisper often drops "от".
+  // e.g., "5 май до 10 май", "пети до десети май", "5 до 10 май"
+  if (!start && !end) {
+    const monthAlt = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    // Pattern 1: "<day> [<month>] до <day> <month>" — most common Whisper form
+    const bareTo = s.match(new RegExp(
+      `(?<![\\p{L}])([\\p{L}\\d]+(?:\\s+(?:${monthAlt}))?)\\s+до\\s+(.+?)(?:$|\\s+(?:${TRAIL}))`, "u"
+    ));
+    if (bareTo) {
+      const leg1 = bareTo[1].trim();
+      const leg2 = bareTo[2].trim();
+      const d1 = parseBGDate(leg1, ctx);
+      const d2 = parseBGDate(leg2, ctx);
+      if (d2) {
+        // If d1 parsed, use it; if not, borrow month from leg2
+        if (d1) {
+          start = d1;
+          end = d2;
+        } else {
+          const leg2Month = Object.keys(MONTHS).find(mn => leg2.toLowerCase().includes(mn));
+          if (leg2Month) {
+            const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
+            if (retry) { start = retry; end = d2; }
+          }
+        }
+        // Range harmonisation
+        if (start && end) {
+          const gap = (new Date(end).getTime() - new Date(start).getTime()) / 86400000;
+          if (gap < 0 || gap > 60) {
+            const leg2Month = Object.keys(MONTHS).find(mn => leg2.toLowerCase().includes(mn));
+            if (leg2Month) {
+              const retry = parseBGDate(`${leg1} ${leg2Month}`, ctx);
+              if (retry) start = retry;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Two consecutive day-like tokens + month → date range.
+  // "пети десети май" or "5 10 май" or "пети десети" (current month).
+  // Bulgarian shorthand: first number = start day, second = end day.
+  if (!start && !end) {
+    const monthAlt2 = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    // Build a number-word alternation for ordinals/cardinals 1-31
+    const numWordAlt = Object.keys({ ...ORDINALS, ...CARDINALS })
+      .filter(k => (ORDINALS[k] ?? CARDINALS[k]) <= 31)
+      .sort((a, b) => b.length - a.length).join("|");
+    // Pattern: <numOrDigit> <numOrDigit> [<month>]
+    const twoNumMonth = s.match(new RegExp(
+      `(?<![\\p{L}\\d])(\\d{1,2}|${numWordAlt})\\s+(\\d{1,2}|${numWordAlt})(?:\\s+(${monthAlt2}))?(?![\\p{L}])`, "u"
+    ));
+    if (twoNumMonth) {
+      const d1 = parseNumberLike(twoNumMonth[1]);
+      const d2 = parseNumberLike(twoNumMonth[2]);
+      const mn = twoNumMonth[3] ? MONTHS[twoNumMonth[3]] : null;
+      // Both must be valid day numbers and d1 < d2 (so it looks like a range, not a date)
+      if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2) {
+        const year = ctx.year;
+        if (mn) {
+          start = toIso(year, mn, d1);
+          end   = toIso(year, mn, d2);
+        } else {
+          // No month stated — use current or next month
+          let m = ctx.now.getMonth() + 1;
+          let y = ctx.now.getFullYear();
+          if (d1 < ctx.now.getDate()) { m++; if (m > 12) { m = 1; y++; } }
+          start = toIso(y, m, d1);
+          end   = toIso(y, m, d2);
+        }
+      }
     }
   }
 
@@ -887,10 +1362,12 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   const name = extractName(raw);
   const phone = extractPhone(raw);
   const guests = extractGuestCount(raw);
+  const children = extractChildren(raw);
   const email = extractEmail(raw);
   const pricePerNight = extractPricePerNight(raw);
   const arrivalTime = extractTime(raw, "arrival");
   const departureTime = extractTime(raw, "departure");
+  const source = extractSource(raw);
 
   // Notes: explicit "бележка"/"коментар" text, augmented with any
   // special-request phrases detected anywhere in the transcript.
@@ -901,7 +1378,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   if (specials) noteParts.push(specials);
   const notes = noteParts.length ? noteParts.join("; ") : null;
 
-  return { name, room, start, end, phone, guests, notes, email, pricePerNight, arrivalTime, departureTime };
+  return { name, room, start, end, phone, guests, children, notes, email, pricePerNight, arrivalTime, departureTime, source };
 }
 
 // ──────────────────────────────────────────────────────────────────────────

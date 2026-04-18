@@ -39,6 +39,14 @@ export async function POST(req: Request) {
     whisperForm.append("model", "whisper-1");
     whisperForm.append("language", "bg");
     whisperForm.append("response_format", "json");
+    // Prompt guides Whisper's output format — helps it produce room codes
+    // with dots/dashes and recognise reservation-domain vocabulary.
+    whisperForm.append("prompt",
+      "Резервация за хотел Флора. " +
+      "Стаи: 1.1, 1.2, 1.3, 1.3A, 1.5, 2.2, 2.4.1, 2.4.2, 2.4.3, 2.5, 3.1, 4.1, 4.2, 5.5, 39.0.1, 41.0.1, 41.0.2, 41-2. " +
+      "Месеци: януари, февруари, март, април, май, юни, юли, август, септември, октомври, ноември, декември. " +
+      "Гост, стая, от дата, до дата, телефон, деца, възрастни, нощувки, бележка."
+    );
 
     const whisperRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",

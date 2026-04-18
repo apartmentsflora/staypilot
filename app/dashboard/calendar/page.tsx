@@ -167,7 +167,7 @@ export default function CalendarPage() {
         email: voiceParsed?.email || "",
         notes: voiceParsed?.notes || "",
         guests: voiceParsed?.guests || "2",
-        children: "0",
+        children: voiceParsed?.children != null ? String(voiceParsed.children) : "0",
         pricePerNight: voiceParsed?.pricePerNight || 80,
         arrivalTime: voiceParsed?.arrivalTime || "14:00",
         departTime: voiceParsed?.departureTime || "11:00",
@@ -316,12 +316,8 @@ export default function CalendarPage() {
   }
 
   // Start MediaRecorder (iOS Safari → sends to Whisper API)
+  // Also tried on Chrome/Firefox iOS — if getUserMedia fails, we fall back to manual text.
   async function startMediaRecording() {
-    // Chrome/Firefox on iOS cannot reliably access getUserMedia
-    if (isIOSNonSafari) {
-      alert("Гласовото записване работи само в Safari на iPhone. Моля, отворете сайта в Safari.");
-      return;
-    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // iOS Safari: audio/mp4 is the ONLY reliable format (14.5-17.x)
@@ -398,10 +394,13 @@ export default function CalendarPage() {
       setTranscript("");
     } catch (err: any) {
       console.error("getUserMedia failed:", err);
-      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        alert("Микрофонът е блокиран. Отидете в Настройки → Safari → Микрофон и разрешете достъп.");
+      // On Chrome/Firefox iOS, getUserMedia always fails — show manual input gracefully
+      if (isIOSNonSafari) {
+        setTranscript("Гласовото записване не е налично в този браузър. Въведете командата с текст по-долу.");
+      } else if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setTranscript("Микрофонът е блокиран. Разрешете достъп в настройките на браузъра.");
       } else {
-        alert("Не може да се стартира микрофонът: " + (err.message || err.name || "неизвестна грешка"));
+        setTranscript("Не може да се стартира микрофонът. Въведете командата с текст по-долу.");
       }
       setVoiceStatus("idle");
     }
@@ -410,10 +409,10 @@ export default function CalendarPage() {
   function startVoice() {
     if (hasSpeechAPI) {
       startNativeVoice();
-    } else if (whisperAvailable && !isIOSNonSafari) {
+    } else if (whisperAvailable) {
+      // Try MediaRecorder on any platform — if it fails (e.g., Chrome iOS),
+      // the catch block shows a graceful fallback message + manual input.
       startMediaRecording();
-    } else if (isIOSNonSafari) {
-      alert("Гласовото записване работи само в Safari на iPhone. Моля, отворете сайта в Safari.");
     }
     // If neither available, the UI shows manual text input instead
   }
@@ -957,8 +956,8 @@ export default function CalendarPage() {
             <div style={{ padding:"20px" }}>
 
               {/* MODE 1: Native SpeechRecognition (desktop Chrome/Firefox/Edge/macOS Safari) */}
-              {/* MODE 2: MediaRecorder + Whisper (iOS Safari with API key) */}
-              {(hasSpeechAPI || (whisperAvailable && !isIOSNonSafari)) && (
+              {/* MODE 2: MediaRecorder + Whisper (iOS Safari, or try on Chrome iOS too) */}
+              {(hasSpeechAPI || whisperAvailable) && (
                 <>
                   <button onClick={voiceStatus==="listening" ? stopVoice : startVoice}
                     style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none", WebkitTapHighlightColor:"transparent" }}>
@@ -976,13 +975,11 @@ export default function CalendarPage() {
                 </>
               )}
 
-              {/* MODE 3: Manual text input — shown when no voice API available, OR on iOS non-Safari */}
-              {(!hasSpeechAPI && !whisperAvailable) || isIOSNonSafari ? (
+              {/* MODE 3: Manual text input — shown when no voice API available */}
+              {!hasSpeechAPI && !whisperAvailable ? (
                 <div style={{ marginBottom:"14px" }}>
                   <div style={{ background:"#fef3c7", border:"1px solid #fcd34d", borderRadius:"8px", padding:"10px 12px", marginBottom:"12px", fontSize:"12px", color:"#78350f" }}>
-                    {isIOSNonSafari
-                      ? "Гласовото записване работи само в Safari на iPhone. Тук можете да въведете командата с текст."
-                      : "Вашият браузър не поддържа гласово разпознаване. Въведете командата с текст или използвайте бутона 🎤 на клавиатурата."}
+                    {"Вашият браузър не поддържа гласово разпознаване. Въведете командата с текст или използвайте бутона 🎤 на клавиатурата."}
                   </div>
                   <textarea
                     value={manualInput}
@@ -1004,15 +1001,29 @@ export default function CalendarPage() {
               )}
               {voiceParsed && (
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"14px" }}>
-                  {[["Гост",voiceParsed.name],["Стая",voiceParsed.room],["От дата",voiceParsed.start?fmtS(voiceParsed.start):"—"],["До дата",voiceParsed.end?fmtS(voiceParsed.end):"—"],["Телефон",voiceParsed.phone||null]].filter(([,v])=>v).map(([lbl,val])=>(
-                    <div key={lbl as string} style={{ background:"#f0efff", borderRadius:"7px", padding:"8px 11px", border:"1px solid #ddd3fe" }}>
-                      <div style={{ fontSize:"10px", fontWeight:"700", color:"#6c63ff", letterSpacing:".3px" }}>{(lbl as string).toUpperCase()}</div>
-                      <div style={{ fontSize:"12px", fontWeight:"600", color:"#3b0764", marginTop:"3px" }}>{val as string}</div>
+                  {([
+                    ["Гост", voiceParsed.name],
+                    ["Стая", voiceParsed.room],
+                    ["От дата", voiceParsed.start ? fmtS(voiceParsed.start) : null],
+                    ["До дата", voiceParsed.end ? fmtS(voiceParsed.end) : null],
+                    ["Възрастни", voiceParsed.guests != null ? String(voiceParsed.guests) : null],
+                    ["Деца", voiceParsed.children != null ? String(voiceParsed.children) : null],
+                    ["Телефон", voiceParsed.phone],
+                    ["Email", voiceParsed.email],
+                    ["Цена/нощ", voiceParsed.pricePerNight != null ? `€${voiceParsed.pricePerNight}` : null],
+                    ["Пристигане", voiceParsed.arrivalTime],
+                    ["Заминаване", voiceParsed.departureTime],
+                    ["Източник", voiceParsed.source],
+                    ["Бележки", voiceParsed.notes],
+                  ] as [string, string | null][]).filter(([,v]) => v != null).map(([lbl, val]) => (
+                    <div key={lbl} style={{ background:"#f0efff", borderRadius:"7px", padding:"8px 11px", border:"1px solid #ddd3fe", ...((lbl === "Бележки" || lbl === "Източник") ? { gridColumn: "1 / -1" } : {}) }}>
+                      <div style={{ fontSize:"10px", fontWeight:"700", color:"#6c63ff", letterSpacing:".3px" }}>{lbl.toUpperCase()}</div>
+                      <div style={{ fontSize:"12px", fontWeight:"600", color:"#3b0764", marginTop:"3px" }}>{val}</div>
                     </div>
                   ))}
                 </div>
               )}
-              {!voiceParsed && !transcript && (hasSpeechAPI || (whisperAvailable && !isIOSNonSafari)) && (
+              {!voiceParsed && !transcript && (hasSpeechAPI || whisperAvailable) && (
                 <div style={{ background:"#faf9f7", borderRadius:"8px", padding:"12px", border:"1px solid #e5e2dc", marginBottom:"14px" }}>
                   <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", marginBottom:"7px" }}>Примерни команди:</div>
                   {["Резервация за Иван Петров стая 1.3 от пети май до десети май","Запиши Мария Иванова стая 2.4.1 от 12 юни до 15 юни","Нова резервация стая 41.0.2 Georgi Kolev от 3 юли до 7 юли"].map((ex,i) => (
@@ -1022,8 +1033,8 @@ export default function CalendarPage() {
                   ))}
                 </div>
               )}
-              {/* Manual text fallback — always available as secondary option on iOS */}
-              {!hasSpeechAPI && whisperAvailable && !isIOSNonSafari && voiceStatus === "idle" && !voiceParsed && (
+              {/* Manual text fallback — always available as secondary option when using Whisper */}
+              {!hasSpeechAPI && whisperAvailable && voiceStatus === "idle" && !voiceParsed && (
                 <div style={{ borderTop:"1px solid #eee", paddingTop:"12px", marginBottom:"12px" }}>
                   <div style={{ fontSize:"11px", color:"#888", marginBottom:"6px" }}>Или въведете командата с текст:</div>
                   <div style={{ display:"flex", gap:"6px" }}>

@@ -57,12 +57,11 @@ export async function POST(req: Request) {
   } catch (e) { console.error("[beds24 webhook] log received failed", e); }
 
   // ── Route 1: SYNC_ROOM inventory webhook ───────────────────────────────
-  // Minimal payload — return 200 immediately, process in background.
+  // Process synchronously — fire-and-forget does NOT work on Netlify
+  // serverless (function is killed after response). Single-property fetch
+  // keeps total time ~3s, well within Beds24's retry window.
   if (payload?.action === "SYNC_ROOM") {
-    processSyncRoom(payload).catch((e) =>
-      console.error("[beds24 webhook] background SYNC_ROOM failed", e)
-    );
-    return NextResponse.json({ ok: true, action: "SYNC_ROOM", accepted: true });
+    return processSyncRoom(payload);
   }
 
   // ── Route 2: Booking webhook (v2 full payload) ─────────────────────────
@@ -170,17 +169,17 @@ async function handleBookingWebhook(payload: any) {
   return NextResponse.json({ ok: true, mappedRoomCode: roomCode, bookingId });
 }
 
-// ── Background SYNC_ROOM processor ───────────────────────────────────────
-// Runs AFTER the 200 response is already sent. Fetches bookings from the
-// Beds24 API for ONLY the specific property that triggered the webhook
-// (not both), then upserts matching bookings into the database.
+// ── SYNC_ROOM processor ──────────────────────────────────────────────────
+// Fetches bookings from the Beds24 API for ONLY the specific property that
+// triggered the webhook (not both), then upserts matching bookings.
+// Runs synchronously — Netlify kills serverless functions after response.
 async function processSyncRoom(payload: any) {
   const propId = Number(payload.propId || payload.propertyId);
   const roomId = Number(payload.roomId);
 
   if (!propId || !roomId) {
     await logSync("PROCESSED", { action: "SYNC_ROOM", applied: false, reason: "missing propId/roomId" });
-    return;
+    return NextResponse.json({ ok: true, action: "SYNC_ROOM", applied: false, reason: "missing propId/roomId" });
   }
 
   const dynamicMap = await loadBeds24Map();
@@ -188,14 +187,14 @@ async function processSyncRoom(payload: any) {
   const roomCode = dynamicMap[key] || null;
   if (!roomCode) {
     await logSync("PROCESSED", { action: "SYNC_ROOM", key, mapped: false });
-    return;
+    return NextResponse.json({ ok: true, action: "SYNC_ROOM", mapped: false, key });
   }
 
   const { data: room } = await supabaseAdmin
     .from("Room").select("id").eq("code", roomCode).maybeSingle();
   if (!room) {
     await logSync("PROCESSED", { action: "SYNC_ROOM", mapped: false, roomCode });
-    return;
+    return NextResponse.json({ ok: true, action: "SYNC_ROOM", mapped: false, roomCode });
   }
 
   const today = new Date().toISOString().slice(0, 10);
@@ -207,7 +206,7 @@ async function processSyncRoom(payload: any) {
   } catch (e: any) {
     console.error("[beds24 webhook] SYNC_ROOM fetch failed", e);
     await logSync("ERROR", { action: "SYNC_ROOM", roomCode, error: e.message });
-    return;
+    return NextResponse.json({ ok: false, action: "SYNC_ROOM", error: "fetch failed" }, { status: 502 });
   }
 
   // Filter to only bookings for this specific room
@@ -290,6 +289,11 @@ async function processSyncRoom(payload: any) {
 
   await logSync("PROCESSED", {
     action: "SYNC_ROOM", roomCode, key, via: "inventory-webhook",
+    found: roomBookings.length, inserted, updated, cancelled, errors,
+  });
+
+  return NextResponse.json({
+    ok: true, action: "SYNC_ROOM", roomCode,
     found: roomBookings.length, inserted, updated, cancelled, errors,
   });
 }

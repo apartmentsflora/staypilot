@@ -138,9 +138,9 @@ export default function CalendarPage() {
     return () => clearInterval(iv);
   }, []);
 
-  // ── Beds24 auto-sync every 2 min — safety net when webhooks don't fire ──
+  // ── Beds24 auto-sync every 30s — safety net when webhooks don't fire ────
   // Calls the full import endpoint (same as Sync Now button) automatically.
-  // 2 properties / ~15 bookings — lightweight call, well within rate limits.
+  // 2 calls per cycle × 2 per min = ~20 calls/5min (33% of Beds24's 60/5min limit).
   const syncingRef = useRef(false);
   const syncNow = useCallback(async () => {
     if (syncingRef.current) return;
@@ -158,7 +158,7 @@ export default function CalendarPage() {
 
   useEffect(() => {
     syncNow(); // immediate first sync on page load
-    const iv = setInterval(syncNow, 2 * 60_000); // every 2 minutes
+    const iv = setInterval(syncNow, 30_000); // every 30 seconds
     return () => clearInterval(iv);
   }, [syncNow]);
 
@@ -607,7 +607,7 @@ export default function CalendarPage() {
             })}
             <div style={{ display:"flex", alignItems:"center", gap:"5px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"7px", padding:"5px 10px", fontSize:"11px", color:"#15803d" }}>
               <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#22c55e", animation:"pulse 2s infinite" }} />
-              Beds24 · 2мин
+              Beds24 · 30с
             </div>
             <button onClick={syncNow} disabled={syncing}
               style={{ background: syncing ? "#fef3c7" : "#eff6ff", color: syncing ? "#92400e" : "#1d4ed8", border: `1px solid ${syncing ? "#fcd34d" : "#93c5fd"}`, borderRadius:"7px", padding:"5px 12px", fontSize:"11px", fontWeight:"600", cursor: syncing ? "default" : "pointer", opacity: syncing ? 0.8 : 1 }}>

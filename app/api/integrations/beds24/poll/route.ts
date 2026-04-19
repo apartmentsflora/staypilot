@@ -23,7 +23,7 @@ import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 // our own DB. No sensitive data is exposed in the response.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const MIN_INTERVAL_MS = 90_000; // 90 seconds between polls
+const MIN_INTERVAL_MS = 20_000; // 20 seconds between polls
 const CANCELLED_STATUSES = new Set(["cancelled", "black"]);
 
 export async function GET() {

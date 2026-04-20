@@ -5,7 +5,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getSession } from "@/lib/auth";
 
-export const EXPENSE_CATEGORIES = [
+const EXPENSE_CATEGORIES = [
   "Ток",           // Electricity
   "Вода",           // Water
   "Интернет",       // Internet/WiFi

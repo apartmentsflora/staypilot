@@ -300,6 +300,50 @@ export async function beds24Ping(): Promise<{ ok: boolean; reason?: string }> {
 }
 
 /**
+ * Detect the original booking source/channel from Beds24's `referer` field.
+ * Beds24 v2 bookings carry a `referer` string that names the OTA channel:
+ *   "booking.com", "airbnb", "Airbnb", "expedia", "direct", etc.
+ * Also checks `apiReference` / `channelName` as fallbacks.
+ * Returns our internal source label.
+ */
+export function detectBookingSource(b: any): string {
+  const ref = (b.referer || b.referrer || b.channelName || b.apiReference || "").toLowerCase();
+  if (/booking\.?com/i.test(ref)) return "Booking";
+  if (/airbnb/i.test(ref)) return "Airbnb";
+  if (/expedia/i.test(ref)) return "Expedia";
+  if (/hotels\.?com/i.test(ref)) return "Hotels.com";
+  if (/trivago/i.test(ref)) return "Trivago";
+  if (/vrbo|homeaway/i.test(ref)) return "VRBO";
+  if (/agoda/i.test(ref)) return "Agoda";
+  if (/hostelworld/i.test(ref)) return "Hostelworld";
+  if (/staypilot/i.test(ref)) return "Директна";
+  if (/direct/i.test(ref)) return "Директна";
+  // Check bookId patterns — Booking.com IDs often start with certain prefixes
+  const bookId = String(b.bookId || b.apiReference || "");
+  if (/^bdc-/i.test(bookId) || /^booking/i.test(bookId)) return "Booking";
+  if (/^airbnb/i.test(bookId)) return "Airbnb";
+  // Default: came through Beds24 but channel unknown
+  return "Beds24";
+}
+
+/**
+ * Extract total price from a Beds24 booking. Beds24 v2 may include
+ * `price` (total), `invoiceItems`, or we can compute from `numNight` * rate.
+ */
+export function extractBookingPrice(b: any): number | null {
+  // Direct price field
+  if (b.price != null && Number(b.price) > 0) return Number(b.price);
+  // Total from invoice
+  if (b.totalPrice != null && Number(b.totalPrice) > 0) return Number(b.totalPrice);
+  // Sum invoice items
+  if (Array.isArray(b.invoiceItems)) {
+    const sum = b.invoiceItems.reduce((acc: number, item: any) => acc + (Number(item.amount) || 0), 0);
+    if (sum > 0) return sum;
+  }
+  return null;
+}
+
+/**
  * Pull bookings from Beds24 for both Flora properties across a date
  * window. Returns the raw array (possibly paginated) or null on failure.
  * The caller is responsible for mapping each booking → Reservation upsert

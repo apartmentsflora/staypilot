@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { fetchBeds24Bookings } from "@/lib/beds24";
+import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,6 +120,11 @@ export async function GET() {
         continue;
       }
 
+      const detectedSource = detectBookingSource(b);
+      const totalPrice = extractBookingPrice(b);
+      const nights = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+      const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
+
       const row = {
         guestName, phone, email,
         roomCode, roomId: room.id,
@@ -130,6 +135,8 @@ export async function GET() {
         notes: b.notes || null,
         guests: numAdult,
         children: numChild,
+        source: detectedSource,
+        ...(pricePerNight != null ? { pricePerNight } : {}),
       };
 
       if (existing) {
@@ -138,7 +145,7 @@ export async function GET() {
       } else {
         // Genuinely new booking — insert it
         const { error: upsertErr } = await supabaseAdmin.from("Reservation").upsert(
-          { ...row, source: "Beds24", externalRef },
+          { ...row, externalRef },
           { onConflict: "externalRef" },
         );
         if (upsertErr) {

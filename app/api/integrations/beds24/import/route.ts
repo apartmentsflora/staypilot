@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import { BEDS24_MAP, loadBeds24Map, getRoomColor } from "@/lib/rooms";
-import { fetchBeds24Bookings } from "@/lib/beds24";
+import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
 
 // Bootstrap / reconcile endpoint.
 //
@@ -93,6 +93,11 @@ export async function POST(req: Request) {
 
     const numAdult = Number(b.numAdult) || 1;
     const numChild = Number(b.numChild) || 0;
+    const detectedSource = detectBookingSource(b);
+    const totalPrice = extractBookingPrice(b);
+    // Compute pricePerNight from total if available
+    const nights = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+    const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
 
     if (existing) {
       await supabaseAdmin.from("Reservation").update({
@@ -107,6 +112,8 @@ export async function POST(req: Request) {
         notes: b.notes || null,
         guests: numAdult,
         children: numChild,
+        source: detectedSource,
+        ...(pricePerNight != null ? { pricePerNight } : {}),
       }).eq("id", existing.id);
       updated++;
     } else {
@@ -117,13 +124,14 @@ export async function POST(req: Request) {
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
         endDate: end.toISOString(),
-        source: "Beds24",
+        source: detectedSource,
         notes: b.notes || null,
         status: "CONFIRMED",
         color: getRoomColor(roomCode),
         externalRef,
         guests: numAdult,
         children: numChild,
+        ...(pricePerNight != null ? { pricePerNight } : {}),
       }, { onConflict: "externalRef" });
       inserted++;
     }
@@ -134,11 +142,15 @@ export async function POST(req: Request) {
       provider: "beds24", direction: "BOOTSTRAP", status: "PROCESSED",
       payload: { from, to, inserted, updated, cancelled, skipped, total: bookings.length },
     });
-    await supabaseAdmin.from("Notification").insert({
-      type: "IMPORT",
-      title: `Beds24 · Масов импорт`,
-      detail: `Нови: ${inserted} · Обновени: ${updated} · Анулирани: ${cancelled} · Пропуснати: ${skipped}`,
-    });
+    // Only create a notification when something actually changed —
+    // prevents spam when auto-sync calls this endpoint every 30s
+    if (inserted > 0 || cancelled > 0) {
+      await supabaseAdmin.from("Notification").insert({
+        type: "IMPORT",
+        title: `Beds24 · Масов импорт`,
+        detail: `Нови: ${inserted} · Обновени: ${updated} · Анулирани: ${cancelled} · Пропуснати: ${skipped}`,
+      });
+    }
   } catch { /* never cascade logging failures */ }
 
   return NextResponse.json({

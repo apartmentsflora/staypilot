@@ -74,7 +74,7 @@ export default function CalendarPage() {
   const [tlAnchor, setTlAnchor] = useState(new Date(now.getFullYear(), now.getMonth(), 1));
   const [rooms, setRooms] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
-  const [filters, setFilters] = useState({ bk:true, b2:true, ph:true, dr:true, web:true });
+  const [filters, setFilters] = useState({ bk:true, b2:true, ph:true, dr:true, web:true, ab:true });
   const [modal, setModal] = useState(false);
   const [editingRes, setEditingRes] = useState<any>(null); // null = new, object = editing
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -229,6 +229,7 @@ export default function CalendarPage() {
     if (r.source==="Телефон" && !filters.ph) return false;
     if ((r.source==="Директна"||r.source==="Direct") && !filters.dr) return false;
     if (r.source==="Уебсайт" && !filters.web) return false;
+    if (r.source==="Airbnb"  && !filters.ab) return false;
     return true;
   }), [reservations, filters]);
 
@@ -313,7 +314,9 @@ export default function CalendarPage() {
     if (!SR) return;
     const rec = new SR();
     rec.lang = "bg-BG";
-    rec.continuous = false;
+    // continuous=true keeps listening through pauses — prevents Chrome
+    // from cutting off after the first sentence. User clicks stop to finish.
+    rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
     recogRef.current = rec;
@@ -322,23 +325,17 @@ export default function CalendarPage() {
     setTranscript("");
 
     rec.onresult = (e: any) => {
-      let finalT = "";
+      // Accumulate ALL final results (continuous mode fires multiple final chunks)
+      let allFinal = "";
       let interimT = "";
       for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) finalT += e.results[i][0].transcript;
+        if (e.results[i].isFinal) allFinal += e.results[i][0].transcript;
         else interimT += e.results[i][0].transcript;
       }
-      const displayText = finalT || interimT;
+      const displayText = (allFinal + (interimT ? " " + interimT : "")).trim();
       if (displayText) {
         setTranscript(displayText);
-        lastTranscriptRef.current = displayText;
-      }
-      if (finalT) {
-        setVoiceStatus("processing");
-        const parsed = parseVoice(finalT, yr);
-        setVoiceParsed(parsed);
-        saveTranscriptHistory(finalT, parsed);
-        setVoiceStatus("idle");
+        lastTranscriptRef.current = allFinal || displayText;
       }
     };
     rec.onerror = (e: any) => {
@@ -349,7 +346,9 @@ export default function CalendarPage() {
       setVoiceStatus("idle");
     };
     rec.onend = () => {
-      if (lastTranscriptRef.current && !voiceParsed) {
+      // In continuous mode, onend fires when user clicks stop or on error.
+      // Process the accumulated transcript.
+      if (lastTranscriptRef.current) {
         setVoiceStatus("processing");
         const parsed = parseVoice(lastTranscriptRef.current, yr);
         setVoiceParsed(parsed);
@@ -596,8 +595,8 @@ export default function CalendarPage() {
               style={{ background:"#f5f3ef", border:"1px solid #dedad4", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"16px" }}>›</button>
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:"7px", flexWrap:"wrap" }}>
-            {(["bk","b2","ph","dr","web"] as const).map((k) => {
-              const labels = { bk:"Booking.com", b2:"Beds24", ph:"Телефон", dr:"Директна", web:"Уебсайт" };
+            {(["bk","b2","ph","dr","web","ab"] as const).map((k) => {
+              const labels = { bk:"Booking.com", b2:"Beds24", ph:"Телефон", dr:"Директна", web:"Уебсайт", ab:"Airbnb" };
               return (
                 <button key={k} onClick={() => setFilters(f => ({...f, [k]:!f[k]}))}
                   style={{ border:"1px solid #dedad4", borderRadius:"7px", padding:"5px 10px", fontSize:"11px", background: filters[k] ? "#f0efff" : "#fff", color: filters[k] ? "#6c63ff" : "#555", cursor:"pointer", borderColor: filters[k] ? "#6c63ff" : "#dedad4" }}>
@@ -611,7 +610,7 @@ export default function CalendarPage() {
             </div>
             <button onClick={syncNow} disabled={syncing}
               style={{ background: syncing ? "#fef3c7" : "#eff6ff", color: syncing ? "#92400e" : "#1d4ed8", border: `1px solid ${syncing ? "#fcd34d" : "#93c5fd"}`, borderRadius:"7px", padding:"5px 12px", fontSize:"11px", fontWeight:"600", cursor: syncing ? "default" : "pointer", opacity: syncing ? 0.8 : 1 }}>
-              {syncing ? "⟳ Синхр..." : "⟳ Sync Now"}
+              {syncing ? "Синхр..." : "Sync"}
             </button>
             <button onClick={() => openNewRes(toDS(now))}
               style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"7px 14px", fontSize:"12px", fontWeight:"600", cursor:"pointer" }}>
@@ -632,12 +631,12 @@ export default function CalendarPage() {
                 const outside = dt.getMonth() !== mo;
                 const isSel = ds === sel;
                 const isToday = ds === todayStr;
-                const dr = activeOn(ds);
+                const dr = outside ? [] : activeOn(ds);
                 return (
-                  <div key={ds} onClick={() => { setSel(ds); openNewRes(ds); }}
-                    style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", padding:"7px 6px", minHeight:"120px", cursor:"pointer", background: isSel ? "#f0efff" : "white", outline: isSel ? "2px solid #6c63ff" : "none", outlineOffset:"-2px", opacity: outside ? 0.4 : 1, transition:"background .1s" }}>
+                  <div key={ds} onClick={() => { if (!outside) { setSel(ds); openNewRes(ds); } }}
+                    style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", padding:"7px 6px", minHeight:"120px", cursor: outside ? "default" : "pointer", background: isSel && !outside ? "#f0efff" : "white", outline: isSel && !outside ? "2px solid #6c63ff" : "none", outlineOffset:"-2px", opacity: outside ? 0.35 : 1, transition:"background .1s" }}>
                     <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"5px" }}>
-                      <span style={{ fontSize:"12px", fontWeight:"600", color: isToday ? "#fff" : "#333", background: isToday ? "#6c63ff" : "transparent", borderRadius: isToday ? "50%" : "0", width: isToday ? "21px" : "auto", height: isToday ? "21px" : "auto", display:"flex", alignItems:"center", justifyContent:"center" }}>{dt.getDate()}</span>
+                      <span style={{ fontSize:"12px", fontWeight:"600", color: isToday ? "#fff" : outside ? "#bbb" : "#333", background: isToday ? "#6c63ff" : "transparent", borderRadius: isToday ? "50%" : "0", width: isToday ? "21px" : "auto", height: isToday ? "21px" : "auto", display:"flex", alignItems:"center", justifyContent:"center" }}>{dt.getDate()}</span>
                       {dr.length > 0 && <span style={{ fontSize:"10px", background:"#6c63ff", color:"#fff", borderRadius:"4px", padding:"1px 5px", fontWeight:"600" }}>{dr.length}</span>}
                     </div>
                     {dr.slice(0,3).map(r => {
@@ -789,7 +788,7 @@ export default function CalendarPage() {
               <div style={{ display:"flex", gap:"8px", alignItems:"center" }}>
                 <button onClick={() => { setModal(false); setVoiceOpen(true); }}
                   style={{ background:"linear-gradient(135deg,#6c63ff,#4a43cc)", color:"#fff", border:"2px solid #a09fff", borderRadius:"8px", padding:"7px 14px", cursor:"pointer", fontSize:"13px", fontWeight:"600", display:"flex", alignItems:"center", gap:"6px", whiteSpace:"nowrap", boxShadow:"0 2px 8px rgba(108,99,255,.3)" }}>
-                  🎤 Гласово попълване
+                  Гласово попълване
                 </button>
                 <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#1e1e2e", color:"#777", border:"1px solid #2a2a40", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
               </div>
@@ -812,7 +811,23 @@ export default function CalendarPage() {
                     <div key={f.id} style={f.span ? {gridColumn:"1 / -1"} : {}}>
                       <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>{f.label.toUpperCase()}</label>
                       <input type={f.type||"text"} placeholder={f.placeholder||""} value={form[f.id]||""}
-                        onChange={e => setForm((prev:any) => ({...prev, [f.id]: e.target.value}))}
+                        // endDate: set min to startDate so the picker opens near that month
+                        {...(f.id === "endDate" && form.startDate ? { min: form.startDate } : {})}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setForm((prev:any) => {
+                            const next = {...prev, [f.id]: val};
+                            // When startDate changes, auto-advance endDate if it's empty or before new startDate
+                            if (f.id === "startDate" && val) {
+                              if (!prev.endDate || prev.endDate <= val) {
+                                const nextDay = new Date(val + "T00:00:00");
+                                nextDay.setDate(nextDay.getDate() + 1);
+                                next.endDate = `${nextDay.getFullYear()}-${String(nextDay.getMonth()+1).padStart(2,"0")}-${String(nextDay.getDate()).padStart(2,"0")}`;
+                              }
+                            }
+                            return next;
+                          });
+                        }}
                         style={{ height:"36px", width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"0 11px", fontSize:"13px", background:"#faf9f7", color:"#111", outline:"none", boxSizing:"border-box" }} />
                     </div>
                   ))}
@@ -850,7 +865,7 @@ export default function CalendarPage() {
                 </div>
                 <div style={{ display:"flex", gap:"7px", marginTop:"11px", flexWrap:"wrap" }}>
                   <button onClick={saveRes} style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>
-                    {editingRes ? "💾 Запази промените" : "💾 Запази резервацията"}
+                    {editingRes ? "Запази промените" : "Запази резервацията"}
                   </button>
                   {editingRes && (
                     <button onClick={() => setCancelConfirm(editingRes)} style={{ background:"#fee2e2", color:"#dc2626", border:"1px solid #fca5a5", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer", fontWeight:"600" }}>
@@ -914,7 +929,7 @@ export default function CalendarPage() {
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200 }}
           onClick={() => setCancelConfirm(null)}>
           <div onClick={e => e.stopPropagation()} style={{ background:"#fff", borderRadius:"16px", padding:"32px", maxWidth:"460px", width:"90%", textAlign:"center", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
-            <div style={{ fontSize:"48px", marginBottom:"16px" }}>⚠️</div>
+            <div style={{ marginBottom:"16px" }}><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
             <div style={{ fontSize:"20px", fontWeight:"700", color:"#111", marginBottom:"12px" }}>
               Сигурни ли сте, че искате да анулирате тази резервация?
             </div>
@@ -1002,7 +1017,7 @@ export default function CalendarPage() {
           <div style={{ background:"#fff", borderRadius:"14px", width:"560px", maxWidth:"100%", overflow:"hidden", border:"1px solid #dedad4", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
             <div style={{ background:"#12121c", padding:"15px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
               <div>
-                <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>🎤 Гласово попълване</div>
+                <div style={{ fontSize:"15px", fontWeight:"700", color:"#fff" }}>Гласово попълване</div>
                 <div style={{ fontSize:"11px", color:"#55547a", marginTop:"2px" }}>
                   {hasSpeechAPI ? "Chrome, Firefox, Edge · Говорете на български" :
                    whisperAvailable ? "Записване + Whisper AI · Говорете на български" :
@@ -1019,7 +1034,7 @@ export default function CalendarPage() {
                 <>
                   <button onClick={voiceStatus==="listening" ? stopVoice : startVoice}
                     style={{ width:"80px", height:"80px", borderRadius:"50%", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:"32px", background: voiceStatus==="listening" ? "#6c63ff" : voiceStatus==="processing" ? "#f59e0b" : "#f5f3ff", boxShadow: voiceStatus==="listening" ? "0 0 0 8px rgba(108,99,255,.2)" : "none", WebkitTapHighlightColor:"transparent" }}>
-                    {voiceStatus==="listening" ? "🔴" : voiceStatus==="processing" ? "⏳" : "🎤"}
+                    {voiceStatus==="listening" ? <svg width="24" height="24" viewBox="0 0 24 24" fill="#ef4444"><circle cx="12" cy="12" r="8"/></svg> : voiceStatus==="processing" ? <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> : <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6c63ff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>}
                   </button>
                   <div style={{ textAlign:"center", fontSize:"13px", color:"#555", marginBottom:"14px", minHeight:"20px" }}>
                     {voiceStatus==="idle"
@@ -1027,7 +1042,7 @@ export default function CalendarPage() {
                           ? "Натисни микрофона, говори, после натисни отново за спиране"
                           : "Натисни микрофона и говори на български")
                       : voiceStatus==="listening"
-                      ? (whisperAvailable && !hasSpeechAPI ? "🔴 Записвам... натисни микрофона за край" : "Слушам... говорете ясно")
+                      ? (whisperAvailable && !hasSpeechAPI ? "Записвам... натисни микрофона за край" : "Слушам... говорете ясно")
                       : "Обработвам..."}
                   </div>
                 </>
@@ -1037,7 +1052,7 @@ export default function CalendarPage() {
               {!hasSpeechAPI && !whisperAvailable ? (
                 <div style={{ marginBottom:"14px" }}>
                   <div style={{ background:"#fef3c7", border:"1px solid #fcd34d", borderRadius:"8px", padding:"10px 12px", marginBottom:"12px", fontSize:"12px", color:"#78350f" }}>
-                    {"Вашият браузър не поддържа гласово разпознаване. Въведете командата с текст или използвайте бутона 🎤 на клавиатурата."}
+                    {"Вашият браузър не поддържа гласово разпознаване. Въведете командата с текст."}
                   </div>
                   <textarea
                     value={manualInput}
@@ -1061,7 +1076,7 @@ export default function CalendarPage() {
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"14px" }}>
                   {([
                     ["Гост", voiceParsed.name],
-                    ["Стая", voiceParsed.room || "⚠ Моля, кажете стая"],
+                    ["Стая", voiceParsed.room || "Моля, кажете стая"],
                     ["От дата", voiceParsed.start ? fmtS(voiceParsed.start) : null],
                     ["До дата", voiceParsed.end ? fmtS(voiceParsed.end) : null],
                     ["Възрастни", voiceParsed.guests != null ? String(voiceParsed.guests) : null],
@@ -1121,9 +1136,9 @@ export default function CalendarPage() {
               <div style={{ display:"flex", gap:"8px" }}>
                 <button onClick={confirmVoice} disabled={!voiceParsed}
                   style={{ background: voiceParsed ? "#6c63ff" : "#ddd", color:"#fff", border:"none", borderRadius:"8px", padding:"12px 18px", fontSize:"14px", fontWeight:"600", cursor: voiceParsed ? "pointer" : "not-allowed", flex:1, WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>
-                  ✓ Потвърди и продължи
+                  Потвърди и продължи
                 </button>
-                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); setManualInput(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px 14px", fontSize:"14px", cursor:"pointer", WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>🔄 Опитай пак</button>
+                <button onClick={() => { stopVoice(); setVoiceParsed(null); setTranscript(""); setManualInput(""); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"12px 14px", fontSize:"14px", cursor:"pointer", WebkitTapHighlightColor:"transparent", WebkitAppearance:"none" }}>Опитай пак</button>
               </div>
             </div>
           </div>

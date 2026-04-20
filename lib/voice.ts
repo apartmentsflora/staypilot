@@ -87,6 +87,7 @@ const MONTHS: Record<string, number> = {
   "януари": 1, "февруари": 2, "март": 3, "април": 4, "май": 5, "юни": 6,
   "юли": 7, "август": 8, "септември": 9, "октомври": 10, "ноември": 11, "декември": 12,
   // Common genitive/slurred variants heard in dictation
+  "мая": 5,
   "януария": 1, "февруария": 2, "априла": 4, "юния": 6, "юлия": 7,
   "августа": 8, "септемврия": 9, "октомврия": 10, "ноемврия": 11, "декемврия": 12,
 };
@@ -239,7 +240,7 @@ export function parseBGDate(phrase: string, ctx: { now: Date; year: number }): s
   s = s.replace(/(?<![\p{L}\d])(ъъ+|ъ|аа+|хм+|мм+|значи|нали|така|ей|ами|ама|обаче|де|бе|ве|абе|тъй|ако\s+може|моля)(?![\p{L}\d])/gu, " ");
   // Strip room-identity slices ("стая X", "апартамент X", "номер X") so the
   // digits of a room code (e.g. "1.3", "4.1") are never misread as a date.
-  s = s.replace(/(?<![\p{L}])(стая|апартамент|стаичка|апартаментче|номер)\s+[\p{L}\d\s.\-]+?(?=(?:\s+(?:от|до|за|след|през|с\s+телефон|тел\b|по\s+\d|имейл|е[- ]?mail|email|искат?|с\s+дет|паркинг|с\s+гледка|ранен|ранно|късен|късно|нощувка)|$))/gu, " ");
+  s = s.replace(/(?<![\p{L}])(стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+[\p{L}\d\s.\-]+?(?=(?:\s+(?:от|до|за|след|през|с\s+телефон|тел\b|по\s+\d|имейл|е[- ]?mail|email|искат?|с\s+дет|паркинг|с\s+гледка|ранен|ранно|късен|късно|нощувка)|$))/gu, " ");
   s = s.replace(/\s+/g, " ").trim();
   if (!s) return null;
   const words = s.split(" ");
@@ -541,7 +542,8 @@ function roomCodeHaystack(transcript: string): string {
   // period, or reservation-keyword boundary — not just end-of-string.
   // Note: dots and dashes are PART of room codes (e.g., "41.0.1", "41-2"),
   // so they must NOT appear in the stop-character set.
-  const m = lower.match(/(?:стая|апартамент|стаичка|апартаментче|номер)\s+([\p{L}\d\s.\-]+?)(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|телефон|тел(?![\p{L}])|бележк|коментар|паркинг|закуск|пристига|заминава|идва|тръгва|чекин|чекаут|check|потвърден|непотвърден|фирмен|корпоратив|от\s+букинг|от\s+еърбнб|airbnb|booking|по\s+\d)|$)/u);
+  // "стаят" / "стаята" are colloquial definite forms of "стая" — must be recognised as room anchors
+  const m = lower.match(/(?:стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+([\p{L}\d\s.\-]+?)(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|телефон|тел(?![\p{L}])|бележк|коментар|паркинг|закуск|пристига|заминава|идва|тръгва|чекин|чекаут|check|потвърден|непотвърден|фирмен|корпоратив|от\s+букинг|от\s+еърбнб|airbnb|booking|по\s+\d)|$)/u);
   return m ? m[1].trim() : lower;
 }
 
@@ -557,9 +559,24 @@ export function matchRoomCode(transcript: string): string | null {
 
   // 1) Literal substring, longest first, on the anchored slice.
   //    Also try Cyrillic-а-normalised version.
+  //    BOUNDARY CHECK: reject if the character immediately before the match
+  //    position is a digit — prevents "41.2".includes("1.2") from matching
+  //    room "1.2" when the user said "41.2" (which is room "41-2").
   for (const c of ROOM_CODES_BY_LEN) {
     const cl = c.toLowerCase();
-    if (anchored.includes(cl) || anchoredNorm.includes(cl)) return c;
+    for (const haystack of [anchored, anchoredNorm]) {
+      const pos = haystack.indexOf(cl);
+      if (pos >= 0) {
+        // Ensure the match is not a partial digit sequence:
+        // char before must NOT be a digit, and char after must NOT be
+        // a digit (unless that digit is part of the room code itself).
+        const charBefore = pos > 0 ? haystack[pos - 1] : "";
+        const charAfter = pos + cl.length < haystack.length ? haystack[pos + cl.length] : "";
+        const digitBefore = /\d/.test(charBefore);
+        const digitAfter = /\d/.test(charAfter);
+        if (!digitBefore && !digitAfter) return c;
+      }
+    }
   }
 
   // 2) Strip ALL separators (dashes, dots, spaces) from digit-separator
@@ -599,18 +616,32 @@ export function matchRoomCode(transcript: string): string | null {
 
   // 3) Dashes↔dots conversion: "2-4-2"→"2.4.2", "2.4.2"→"2-4-2".
   //    Run AFTER digit-stripping so we don't prematurely match short codes.
+  //    Same boundary check as step 1 to avoid partial digit matches.
   const dashToDot = anchoredNorm.replace(/-/g, ".");
   const dotToDash = anchoredNorm.replace(/\./g, "-");
   for (const variant of [dashToDot, dotToDash]) {
     for (const c of ROOM_CODES_BY_LEN) {
-      if (variant.includes(c.toLowerCase())) return c;
+      const cl = c.toLowerCase();
+      const pos = variant.indexOf(cl);
+      if (pos >= 0) {
+        const charBefore = pos > 0 ? variant[pos - 1] : "";
+        const charAfter = pos + cl.length < variant.length ? variant[pos + cl.length] : "";
+        if (!/\d/.test(charBefore) && !/\d/.test(charAfter)) return c;
+      }
     }
   }
 
   // 4) Normalised spoken-digit form on the anchored slice.
+  //    Same boundary check as step 1.
   const norm = normalizeCodeTokens(anchored);
   for (const c of ROOM_CODES_BY_LEN) {
-    if (norm.includes(c.toLowerCase())) return c;
+    const cl = c.toLowerCase();
+    const pos = norm.indexOf(cl);
+    if (pos >= 0) {
+      const charBefore = pos > 0 ? norm[pos - 1] : "";
+      const charAfter = pos + cl.length < norm.length ? norm[pos + cl.length] : "";
+      if (!/\d/.test(charBefore) && !/\d/.test(charAfter)) return c;
+    }
   }
 
   // Steps 5-8 use aggressive digit matching. Only safe when there's an
@@ -752,8 +783,10 @@ const NAME_STOP = new Set<string>(
     ...Object.keys(MONTHS),
     ...Object.keys(WEEKDAYS),
     // Workflow / reservation keywords
-    "резервация", "резервирай", "резервацията", "стая", "апартамент", "стаичка",
-    "апартаментче", "номер", "телефон", "тел", "бележка", "коментар", "забележка",
+    "резервация", "резервирай", "резервацията", "стая", "стаят", "стаята",
+    "апартамент", "апартаментът", "стаичка", "стаичката",
+    "апартаментче", "апартаментчето", "номер", "номерът",
+    "телефон", "тел", "бележка", "коментар", "забележка",
     "следващия", "следващата", "следващите", "другия", "другата", "идния", "идната",
     "нощувка", "нощувки", "нощи", "нощ", "дни", "ден", "дена", "седмица", "седмици",
     "възрастни", "възрастен", "деца", "дете", "души", "гости", "човек", "човека",
@@ -1070,7 +1103,7 @@ function extractSpecialRequests(text: string): string | null {
     [/(?:искат?|трябва(?:т)?|нужен|нужно|нуждае)\s+(?:им\s+)?(?:от\s+)?паркинг/u, "паркинг"],
     [/паркомясто/u, "паркинг"],
     [/(?<![\p{L}])паркинг(?![\p{L}])/u, "паркинг"],
-    [/детск[оа]\s+легло|бебешк[оа]\s+легло|кошар[аи]|кошарк[аи]/u, "детско легло"],
+    [/детск[оа]\s+легло|бебешк[оа]\s+легло|кошар[аи]|кошарк[аи]|(?<![А-Яа-яA-Za-z])ДТ(?![А-Яа-яA-Za-z])/iu, "детско легло"],
     // Bed type preferences
     [/раздел(?:ен|н)?[иея]\s+легл[аи]|отделн[иея]\s+легл[аи]|twin\s+beds?|две\s+легл[аи]|сепарирани\s+легл[аи]/iu, "разделни легла"],
     [/двойно\s+легло|голямо\s+легло|king\s*size|queen\s*size|едно\s+голямо\s+легло|matrimonial/iu, "двойно легло"],
@@ -1396,6 +1429,64 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     }
   }
 
+  // Two separate day+month pairs: "25 май, 28 май" or "25 май 28 май"
+  // Each date has its own month — very common in casual speech and Whisper.
+  // Also handles ordinals: "двадесет и пети май двадесет и осми май"
+  if (!start && !end) {
+    const monthAltPair = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    // Digit form: "25 май, 28 май" / "25 май 28 май" / "25 май, 28 юни"
+    const pairDigit = s.match(new RegExp(
+      `(?<![\\p{L}\\d])(\\d{1,2})\\s+(${monthAltPair})\\s*[,;]?\\s*(\\d{1,2})\\s+(${monthAltPair})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+    ));
+    if (pairDigit) {
+      const d1 = parseInt(pairDigit[1], 10);
+      const m1 = MONTHS[pairDigit[2]];
+      const d2 = parseInt(pairDigit[3], 10);
+      const m2 = MONTHS[pairDigit[4]];
+      const yr = pairDigit[5] ? parseInt(pairDigit[5], 10) : ctx.year;
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && m1 && m2) {
+        start = toIso(yr, m1, d1);
+        end   = toIso(yr, m2, d2);
+      }
+    }
+    // Ordinal form: "пети май осми май" / "пети май, осми май"
+    if (!start && !end) {
+      const ordAltPair = Object.keys(ORDINALS).sort((a, b) => b.length - a.length).join("|");
+      const pairOrd = s.match(new RegExp(
+        `(?<![\\p{L}])(${ordAltPair})\\s+(${monthAltPair})\\s*[,;]?\\s*(${ordAltPair})\\s+(${monthAltPair})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+      ));
+      if (pairOrd) {
+        const d1 = ORDINALS[pairOrd[1]];
+        const d2 = ORDINALS[pairOrd[3]];
+        const m1 = MONTHS[pairOrd[2]];
+        const m2 = MONTHS[pairOrd[4]];
+        const yr = pairOrd[5] ? parseInt(pairOrd[5], 10) : ctx.year;
+        if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && m1 && m2) {
+          start = toIso(yr, m1, d1);
+          end   = toIso(yr, m2, d2);
+        }
+      }
+    }
+    // Mixed: digit + month, ordinal + month (or vice versa)
+    if (!start && !end) {
+      const numOrOrdAlt = `\\d{1,2}|${Object.keys({ ...ORDINALS, ...CARDINALS }).filter(k => (ORDINALS[k] ?? CARDINALS[k]) <= 31).sort((a, b) => b.length - a.length).join("|")}`;
+      const pairMixed = s.match(new RegExp(
+        `(?<![\\p{L}\\d])(${numOrOrdAlt})\\s+(${monthAltPair})\\s*[,;]?\\s*(${numOrOrdAlt})\\s+(${monthAltPair})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+      ));
+      if (pairMixed) {
+        const d1 = parseNumberLike(pairMixed[1]);
+        const d2 = parseNumberLike(pairMixed[3]);
+        const m1 = MONTHS[pairMixed[2]];
+        const m2 = MONTHS[pairMixed[4]];
+        const yr = pairMixed[5] ? parseInt(pairMixed[5], 10) : ctx.year;
+        if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && m1 && m2) {
+          start = toIso(yr, m1, d1);
+          end   = toIso(yr, m2, d2);
+        }
+      }
+    }
+  }
+
   // Dash-separated range + month: "10-12 май" → May 10 to May 12.
   // Very common in Whisper output and casual Bulgarian: N-N <month>.
   if (!start && !end) {
@@ -1461,7 +1552,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   if (!start && !end) {
     let dateSearchable = s;
     // Remove "стая <X>" slices so room digits don't interfere
-    dateSearchable = dateSearchable.replace(/(?<![\p{L}])(стая|апартамент|стаичка|апартаментче|номер)\s+[\p{L}\d\s.\-]+?(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|\d{1,2}\s+\d{1,2})|$)/gu, " ");
+    dateSearchable = dateSearchable.replace(/(?<![\p{L}])(стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+[\p{L}\d\s.\-]+?(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|\d{1,2}\s+\d{1,2})|$)/gu, " ");
     // Also strip literal room codes
     for (const c of ROOM_CODES_BY_LEN) {
       dateSearchable = dateSearchable.split(c.toLowerCase()).join(" ");
@@ -1553,7 +1644,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     let searchable = s;
     // Remove "стая <X>" / "апартамент <X>" / "номер <X>" slices entirely —
     // anything after those anchors is room identity, not a date.
-    searchable = searchable.replace(/(?<![\p{L}])(стая|апартамент|стаичка|апартаментче|номер)\s+[\p{L}\d\s.\-]+$/u, "");
+    searchable = searchable.replace(/(?<![\p{L}])(стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+[\p{L}\d\s.\-]+$/u, "");
     // Belt-and-braces: strip any literal room code left in the string.
     for (const c of ROOM_CODES_BY_LEN) {
       searchable = searchable.split(c.toLowerCase()).join(" ");
@@ -1601,7 +1692,26 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     end = isoOf(d);
   }
 
-  const room = matchRoomCode(raw);
+  // Self-correction support: if the transcript contains multiple room mentions
+  // (e.g. "стая 1.2 ... не, стая 41-2"), use the LAST one. Split on room-
+  // context anchors and match from the last segment backwards.
+  let room: string | null = null;
+  const roomAnchors = /(?:стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)/gi;
+  const anchorPositions: number[] = [];
+  let rmatch: RegExpExecArray | null;
+  while ((rmatch = roomAnchors.exec(raw.toLowerCase())) !== null) {
+    anchorPositions.push(rmatch.index);
+  }
+  if (anchorPositions.length > 1) {
+    // Try from last mention backwards — self-correction: last wins
+    for (let i = anchorPositions.length - 1; i >= 0; i--) {
+      const slice = raw.slice(anchorPositions[i]);
+      const candidate = matchRoomCode(slice);
+      if (candidate) { room = candidate; break; }
+    }
+  }
+  if (!room) room = matchRoomCode(raw);
+
   const name = extractName(raw);
   const phone = extractPhone(raw);
   const guests = extractGuestCount(raw);

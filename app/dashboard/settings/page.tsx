@@ -168,7 +168,7 @@ export default function SettingsPage() {
         {/* Website */}
         <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"16px 18px", marginBottom:"14px" }}>
           <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"14px" }}>
-            <div style={{ width:"36px", height:"36px", borderRadius:"8px", background:"#f0fdf4", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"18px" }}>🌐</div>
+            <div style={{ width:"36px", height:"36px", borderRadius:"8px", background:"#f0fdf4", display:"flex", alignItems:"center", justifyContent:"center" }}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
             <div>
               <div style={{ fontSize:"14px", fontWeight:"700" }}>Уебсайт · Директни резервации</div>
               <div style={{ fontSize:"11px", color:"#888" }}>Двупосочна синхронизация с хотелския сайт</div>

@@ -73,16 +73,22 @@ export async function POST(req: Request) {
   if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
 
   // Conflict check (half-open interval: [start, end))
+  // Uses strict < and > so checkout day == check-in day is NOT a conflict.
   const { data: conflicts, error: confErr } = await supabaseAdmin
     .from("Reservation")
-    .select("id")
+    .select("id, guestName, startDate, endDate")
     .eq("roomId", room.id)
     .eq("status", "CONFIRMED")
     .lt("startDate", endDate)
     .gt("endDate", startDate);
   if (confErr) return NextResponse.json({ error: confErr.message }, { status: 500 });
   if (conflicts && conflicts.length > 0) {
-    return NextResponse.json({ error: "Room is already booked for these dates" }, { status: 409 });
+    const existing = conflicts[0];
+    const existStart = existing.startDate?.slice(0, 10) || "?";
+    const existEnd = existing.endDate?.slice(0, 10) || "?";
+    return NextResponse.json({
+      error: `Стаята е заета за тези дати (${existing.guestName}: ${existStart} – ${existEnd})`,
+    }, { status: 409 });
   }
 
   // externalRef: if the client passed one through (e.g. webhook relay), honor it;

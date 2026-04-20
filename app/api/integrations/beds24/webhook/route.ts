@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
+import { detectBookingSource, extractBookingPrice } from "@/lib/beds24";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Beds24 → StayPilot inbound webhook handler
@@ -115,12 +116,18 @@ export async function POST(req: Request) {
 //   - Status:       "confirmed", "new", "request", "cancelled", "black", "inquiry"
 
 async function handleBookingWebhook(payload: any, startMs: number): Promise<NextResponse> {
+  // ── Beds24 v2 booking webhooks wrap the booking data in a `booking` key.
+  //    If present, unwrap it; otherwise fall back to top-level fields
+  //    for backwards compatibility with older payload formats. ──
+  const b = payload?.booking ?? payload;
+
   // ── Extract and validate booking ID ──
-  const bookingId = payload?.id ?? payload?.bookingId;
+  const bookingId = b?.id ?? b?.bookingId;
   if (!bookingId) {
     await logSync("ERROR", {
       step: "booking-webhook", reason: "no booking id",
       payloadKeys: Object.keys(payload || {}),
+      bookingKeys: payload?.booking ? Object.keys(payload.booking) : "no-booking-key",
     });
     return NextResponse.json({
       ok: true, applied: false, reason: "no booking id in payload",
@@ -128,8 +135,8 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
   }
 
   // ── Map Beds24 property:room → internal room code ──
-  const propertyId = payload?.propertyId ?? payload?.propId;
-  const payloadRoomId = payload?.roomId;
+  const propertyId = b?.propertyId ?? b?.propId;
+  const payloadRoomId = b?.roomId;
 
   const roomCode = await mapToRoomCode(propertyId, payloadRoomId);
   if (!roomCode) {
@@ -151,8 +158,8 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
   }
 
   // ── Extract and validate dates ──
-  const arrival = payload.arrival ?? payload.checkin;
-  const departure = payload.departure ?? payload.checkout;
+  const arrival = b.arrival ?? b.checkin;
+  const departure = b.departure ?? b.checkout;
   const dates = parseDates(arrival, departure);
   if (!dates) {
     await logSync("ERROR", {
@@ -166,8 +173,20 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
   }
 
   // ── Extract guest info ──
-  const guest = extractGuest(payload);
-  const isCancelled = CANCELLED_STATUSES.has(payload.status);
+  const guest = extractGuest(b);
+  const isCancelled = CANCELLED_STATUSES.has(b.status);
+
+  // ── Extract source & price from Beds24 v2 fields ──
+  // The webhook payload includes channel, apiSource, referer, price,
+  // commission, and invoiceItems (at payload level, not inside booking).
+  const bookingWithInvoice = {
+    ...b,
+    invoiceItems: payload?.invoiceItems ?? b?.invoiceItems,
+  };
+  const detectedSource = detectBookingSource(b);
+  const totalPrice = extractBookingPrice(bookingWithInvoice);
+  const nights = Math.max(1, Math.round((dates.end.getTime() - dates.start.getTime()) / 86_400_000));
+  const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
 
   // ── Upsert reservation ──
   try {
@@ -183,15 +202,18 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
       email: guest.email,
       numAdult: guest.numAdult,
       numChild: guest.numChild,
-      notes: payload.notes || null,
+      notes: b.notes || null,
       isCancelled,
       arrivalRaw: arrival,
       departureRaw: departure,
       via: "booking-webhook",
+      source: detectedSource,
+      pricePerNight,
     });
     await logSync("PROCESSED", {
       via: "booking-webhook", bookingId, roomCode,
-      guest: guest.name, status: payload.status,
+      guest: guest.name, status: b.status,
+      source: detectedSource, totalPrice, pricePerNight,
       ...result, durationMs: Date.now() - startMs,
     });
     return NextResponse.json({ ok: true, bookingId, roomCode, ...result });
@@ -199,7 +221,7 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
     console.error("[beds24-wh] booking-webhook apply failed:", e);
     await logSync("ERROR", {
       step: "booking-webhook", reason: "upsert failed",
-      bookingId, roomCode, guest: guest.name,
+      bookingId, roomCode, guest: guest.name, source: detectedSource,
       error: String(e?.message || e),
       stack: String(e?.stack || "").slice(0, 500),
     });
@@ -293,6 +315,12 @@ async function handleSyncRoom(payload: any, startMs: number): Promise<NextRespon
       const isCancelled = CANCELLED_STATUSES.has(b.status);
       const externalRef = `beds24-${b.id}`;
 
+      // Extract source & price from Beds24 v2 API response fields
+      const detectedSource = detectBookingSource(b);
+      const totalPrice = extractBookingPrice(b);
+      const bNights = Math.max(1, Math.round((dates.end.getTime() - dates.start.getTime()) / 86_400_000));
+      const bPricePerNight = totalPrice ? Math.round(totalPrice / bNights * 100) / 100 : null;
+
       const result = await upsertReservation({
         externalRef,
         roomCode,
@@ -309,6 +337,8 @@ async function handleSyncRoom(payload: any, startMs: number): Promise<NextRespon
         arrivalRaw: arrival,
         departureRaw: departure,
         via: "inventory-webhook",
+        source: detectedSource,
+        pricePerNight: bPricePerNight,
       });
 
       if (result.action === "inserted") inserted++;
@@ -452,6 +482,8 @@ async function upsertReservation(input: {
   arrivalRaw: string;
   departureRaw: string;
   via: string;
+  source?: string;
+  pricePerNight?: number | null;
 }): Promise<{ action: "inserted" | "updated" | "cancelled" | "skipped" }> {
   const { data: existing } = await supabaseAdmin
     .from("Reservation")
@@ -491,6 +523,8 @@ async function upsertReservation(input: {
     notes: input.notes,
     guests: input.numAdult,
     children: input.numChild,
+    source: input.source || "Beds24",
+    ...(input.pricePerNight != null ? { pricePerNight: input.pricePerNight } : {}),
   };
 
   // ── Case 2: Update existing ──
@@ -510,7 +544,7 @@ async function upsertReservation(input: {
   await supabaseAdmin
     .from("Reservation")
     .upsert(
-      { ...row, source: "Beds24", externalRef: input.externalRef },
+      { ...row, externalRef: input.externalRef },
       { onConflict: "externalRef" },
     );
   await notify("NEW",
@@ -643,7 +677,7 @@ async function fetchPropertyBookings(
   url.searchParams.set("propertyId", String(propertyId));
   url.searchParams.set("departureFrom", from);    // catches guests still in-house
   url.searchParams.set("arrivalTo", to);           // caps the future window
-  url.searchParams.set("includeInvoiceItems", "false");
+  url.searchParams.set("includeInvoiceItems", "true");
   url.searchParams.set("includeGuests", "true");
 
   const fetchStartMs = Date.now();

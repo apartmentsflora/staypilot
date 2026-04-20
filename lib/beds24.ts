@@ -300,14 +300,38 @@ export async function beds24Ping(): Promise<{ ok: boolean; reason?: string }> {
 }
 
 /**
- * Detect the original booking source/channel from Beds24's `referer` field.
- * Beds24 v2 bookings carry a `referer` string that names the OTA channel:
- *   "booking.com", "airbnb", "Airbnb", "expedia", "direct", etc.
- * Also checks `apiReference` / `channelName` as fallbacks.
- * Returns our internal source label.
+ * Detect the original booking source/channel from a Beds24 v2 booking object.
+ *
+ * Priority:
+ *  1. `channel` — structured enum set by Beds24: "booking", "airbnb",
+ *     "agoda", "expedia", "vrbo", "direct", "bookingpage", etc.
+ *  2. `apiSource` — free-text string often set by OTA integrations,
+ *     e.g. "Airbnb.com", "Booking.com".
+ *  3. `referer` — (single 'r') free-text referrer field on the booking.
+ *
+ * Returns our internal source label (title-cased OTA name or "Директна").
  */
 export function detectBookingSource(b: any): string {
-  const ref = (b.referer || b.referrer || b.channelName || b.apiReference || "").toLowerCase();
+  // ── 1. Structured `channel` enum (most reliable) ──
+  const ch = String(b.channel || "").toLowerCase().trim();
+  if (ch === "booking") return "Booking";
+  if (ch === "airbnb") return "Airbnb";
+  if (ch === "expedia") return "Expedia";
+  if (ch === "vrbo") return "VRBO";
+  if (ch === "agoda") return "Agoda";
+  if (ch === "hostelworld") return "Hostelworld";
+  if (ch === "direct" || ch === "bookingpage") return "Директна";
+
+  // ── 2. Free-text `apiSource` ──
+  const api = String(b.apiSource || "").toLowerCase();
+  if (/booking\.?com/i.test(api)) return "Booking";
+  if (/airbnb/i.test(api)) return "Airbnb";
+  if (/expedia/i.test(api)) return "Expedia";
+  if (/vrbo|homeaway/i.test(api)) return "VRBO";
+  if (/agoda/i.test(api)) return "Agoda";
+
+  // ── 3. Free-text `referer` (single 'r' per Beds24 v2 schema) ──
+  const ref = String(b.referer || "").toLowerCase();
   if (/booking\.?com/i.test(ref)) return "Booking";
   if (/airbnb/i.test(ref)) return "Airbnb";
   if (/expedia/i.test(ref)) return "Expedia";
@@ -316,30 +340,42 @@ export function detectBookingSource(b: any): string {
   if (/vrbo|homeaway/i.test(ref)) return "VRBO";
   if (/agoda/i.test(ref)) return "Agoda";
   if (/hostelworld/i.test(ref)) return "Hostelworld";
-  if (/staypilot/i.test(ref)) return "Директна";
-  if (/direct/i.test(ref)) return "Директна";
-  // Check bookId patterns — Booking.com IDs often start with certain prefixes
-  const bookId = String(b.bookId || b.apiReference || "");
-  if (/^bdc-/i.test(bookId) || /^booking/i.test(bookId)) return "Booking";
-  if (/^airbnb/i.test(bookId)) return "Airbnb";
+  if (/staypilot/i.test(ref) || /direct/i.test(ref)) return "Директна";
+
+  // ── 4. If channel was set to anything non-empty, surface it ──
+  if (ch) return ch.charAt(0).toUpperCase() + ch.slice(1);
+
   // Default: came through Beds24 but channel unknown
   return "Beds24";
 }
 
 /**
- * Extract total price from a Beds24 booking. Beds24 v2 may include
- * `price` (total), `invoiceItems`, or we can compute from `numNight` * rate.
+ * Extract total price from a Beds24 v2 booking object.
+ *
+ * Beds24 v2 schema fields used:
+ *  - `price`  — total booking price (number, max 99999999.99)
+ *  - `invoiceItems` — line-item breakdown (only present when
+ *    fetched with `includeInvoiceItems=true`)
+ *
+ * Returns the total price as a number, or null if unavailable.
  */
 export function extractBookingPrice(b: any): number | null {
-  // Direct price field
+  // Direct price field (most reliable — always present in Beds24 v2)
   if (b.price != null && Number(b.price) > 0) return Number(b.price);
-  // Total from invoice
-  if (b.totalPrice != null && Number(b.totalPrice) > 0) return Number(b.totalPrice);
-  // Sum invoice items
+  // Fallback: sum invoice items if present
   if (Array.isArray(b.invoiceItems)) {
     const sum = b.invoiceItems.reduce((acc: number, item: any) => acc + (Number(item.amount) || 0), 0);
     if (sum > 0) return sum;
   }
+  return null;
+}
+
+/**
+ * Extract OTA commission from a Beds24 v2 booking.
+ * Returns the commission amount or null if not set.
+ */
+export function extractBookingCommission(b: any): number | null {
+  if (b.commission != null && Number(b.commission) > 0) return Number(b.commission);
   return null;
 }
 
@@ -364,7 +400,7 @@ export async function fetchBeds24Bookings(from: string, to: string): Promise<any
       // This catches guests who arrived before `from` but depart after it.
       url.searchParams.set("departureFrom", from);
       url.searchParams.set("arrivalTo", to);
-      url.searchParams.set("includeInvoiceItems", "false");
+      url.searchParams.set("includeInvoiceItems", "true");
       url.searchParams.set("includeGuests", "true");
       const r = await fetch(url.toString(), {
         method: "GET",

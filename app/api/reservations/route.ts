@@ -6,6 +6,7 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { getSession } from "@/lib/auth";
 import { getRoomColor } from "@/lib/rooms";
 import { createBeds24Booking } from "@/lib/beds24";
+import { notify } from "@/lib/notify";
 
 const ReservationInput = z.object({
   guestName: z.string().trim().min(1, "guestName is required").max(120),
@@ -22,6 +23,7 @@ const ReservationInput = z.object({
   externalRef: z.string().trim().optional().nullable(),
   guests: z.union([z.string(), z.number()]).optional(),
   children: z.union([z.string(), z.number()]).optional(),
+  cots: z.union([z.string(), z.number()]).optional(),
   pricePerNight: z.union([z.string(), z.number()]).optional(),
   arrivalTime: z.string().optional(),
   departTime: z.string().optional(),
@@ -108,9 +110,11 @@ export async function POST(req: Request) {
     status: "CONFIRMED",
     color: getRoomColor(roomCode),
     externalRef: inboundRef,
-    guests: Number(parsed.data.guests) || 1,
-    children: Number(parsed.data.children) || 0,
-    pricePerNight: Number(parsed.data.pricePerNight) || 0,
+    guests: Math.max(1, Number(parsed.data.guests) || 1),
+    children: Math.max(0, Number(parsed.data.children) || 0),
+    cots: Math.max(0, Number(parsed.data.cots) || 0),
+    pricePerNight: parsed.data.pricePerNight != null && Number(parsed.data.pricePerNight) > 0
+      ? Number(parsed.data.pricePerNight) : null,
     arrivalTime: parsed.data.arrivalTime || "14:00",
     departTime: parsed.data.departTime || "11:00",
   }).select().single();
@@ -120,7 +124,7 @@ export async function POST(req: Request) {
   // Side effects — best-effort; failures are logged but don't fail the request.
   const detailDates = `${startDate.slice(0, 10)} – ${endDate.slice(0, 10)}`;
   try {
-    await supabaseAdmin.from("Notification").insert({
+    await notify({
       type: "NEW",
       title: `Нова резервация · ${roomCode}`,
       detail: `${guestName} · ${source || "Direct"} · ${detailDates}`,
@@ -152,7 +156,7 @@ export async function POST(req: Request) {
         notes: notes || null,
         externalRef: null,
       });
-      if (push.ok) {
+      if (push.ok && push.bookingId) {
         await supabaseAdmin
           .from("Reservation")
           .update({ externalRef: `beds24-${push.bookingId}` })
@@ -163,5 +167,12 @@ export async function POST(req: Request) {
     }
   }
 
-  return NextResponse.json(data, { status: 201 });
+  // Re-select to capture any updates made by side-effects (e.g. externalRef from Beds24 push)
+  const { data: fresh } = await supabaseAdmin
+    .from("Reservation")
+    .select("*, room:Room(code, label, entrance, capacity)")
+    .eq("id", data.id)
+    .single();
+
+  return NextResponse.json(fresh || data, { status: 201 });
 }

@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { BOOKING_MAP, getRoomColor } from "@/lib/rooms";
+import { notify } from "@/lib/notify";
 
 export async function POST(req: Request) {
   try {
@@ -48,13 +49,18 @@ export async function POST(req: Request) {
 
   try {
     if ((payload.status === "cancel" || payload.status === "no_show") && existing) {
-      await supabaseAdmin.from("Reservation").update({ status: "CANCELLED" }).eq("id", existing.id);
-      await supabaseAdmin.from("Notification").insert({
+      await supabaseAdmin.from("Reservation").update({ status: "CANCELLED", cancelledAt: new Date().toISOString() }).eq("id", existing.id);
+      try { await notify({
         type: "CANCEL", title: `Booking.com · Анулиране · ${roomCode}`,
-        detail: `Резервация #${payload.reservation_id}`,
-      });
+        detail: `Резервация #${payload.reservation_id}`, reservationId: existing.id,
+      }); } catch (ne) { console.error("[booking webhook] notify failed", ne); }
     } else if (existing && payload.status !== "cancel" && payload.status !== "no_show") {
       // MODIFY — apply all changes Booking.com reports (dates, guest, room).
+      const numAdult = Math.max(1, Number(payload.guests || payload.num_adults) || 1);
+      const numChild = Math.max(0, Number(payload.children || payload.num_children) || 0);
+      const totalPrice = Number(payload.price || payload.total_price) || 0;
+      const nights = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+      const pricePerNight = totalPrice > 0 ? Math.round(totalPrice / nights * 100) / 100 : null;
       await supabaseAdmin.from("Reservation").update({
         guestName: payload.guest_name || "Booking.com гост",
         phone: payload.phone || "",
@@ -64,13 +70,22 @@ export async function POST(req: Request) {
         endDate: end.toISOString(),
         notes: payload.remarks || null,
         status: "CONFIRMED",
+        cancelledAt: null,
         color: getRoomColor(roomCode),
+        guests: numAdult,
+        children: numChild,
+        ...(pricePerNight != null ? { pricePerNight } : {}),
       }).eq("id", existing.id);
-      await supabaseAdmin.from("Notification").insert({
+      try { await notify({
         type: "SYSTEM", title: `Booking.com · Промяна · ${roomCode}`,
-        detail: `${payload.guest_name || "Гост"} · ${payload.checkin} – ${payload.checkout}`,
-      });
+        detail: `${payload.guest_name || "Гост"} · ${payload.checkin} – ${payload.checkout}`, reservationId: existing.id,
+      }); } catch (ne) { console.error("[booking webhook] notify failed", ne); }
     } else if (!existing && payload.status !== "cancel" && payload.status !== "no_show") {
+      const numAdultNew = Math.max(1, Number(payload.guests || payload.num_adults) || 1);
+      const numChildNew = Math.max(0, Number(payload.children || payload.num_children) || 0);
+      const totalPriceNew = Number(payload.price || payload.total_price) || 0;
+      const nightsNew = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
+      const pricePerNightNew = totalPriceNew > 0 ? Math.round(totalPriceNew / nightsNew * 100) / 100 : null;
       await supabaseAdmin.from("Reservation").insert({
         guestName: payload.guest_name || "Booking.com гост",
         phone: payload.phone || "",
@@ -83,11 +98,14 @@ export async function POST(req: Request) {
         status: "CONFIRMED",
         color: getRoomColor(roomCode),
         externalRef,
+        guests: numAdultNew,
+        children: numChildNew,
+        ...(pricePerNightNew != null ? { pricePerNight: pricePerNightNew } : {}),
       });
-      await supabaseAdmin.from("Notification").insert({
+      try { await notify({
         type: "NEW", title: `Booking.com · Нова резервация · ${roomCode}`,
         detail: `${payload.guest_name || "Гост"} · ${payload.checkin} – ${payload.checkout}`,
-      });
+      }); } catch (ne) { console.error("[booking webhook] notify failed", ne); }
     }
     await supabaseAdmin.from("SyncEvent").insert({
       provider: "booking", direction: "INBOUND_WEBHOOK", status: "PROCESSED",

@@ -5,6 +5,7 @@ import { getSession } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import { BEDS24_MAP, loadBeds24Map, getRoomColor } from "@/lib/rooms";
 import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
+import { notify } from "@/lib/notify";
 
 // Bootstrap / reconcile endpoint.
 //
@@ -68,13 +69,31 @@ export async function POST(req: Request) {
     }
 
     const externalRef = `beds24-${b.id}`;
-    // Guest info may be top-level OR nested inside guests[] when includeGuests=true
-    const guest = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
-    const firstName = guest.firstName || b.firstName || b.guestFirstName || "";
-    const lastName = guest.lastName || b.lastName || b.guestLastName || "";
+
+    // ── Guest info extraction ──
+    // Beds24 v2 GET /bookings returns guest data from THREE sources:
+    //   1. Top-level fields: firstName, lastName, email, phone, mobile (always present)
+    //   2. guests[] array (only with includeGuests=true + bookings-personal scope)
+    //   3. infoItems[] (only with includeInfoItems=true) — code/text pairs
+    // We check all three in priority order.
+    const g0 = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
+
+    // Build infoItems lookup (code → text)
+    const info: Record<string, string> = {};
+    if (Array.isArray(b.infoItems)) {
+      for (const item of b.infoItems) {
+        if (item?.code && item?.text) info[String(item.code).toLowerCase()] = String(item.text);
+      }
+    }
+
+    const firstName = g0.firstName || b.firstName || b.guestFirstName
+      || info["firstname"] || info["first_name"] || "";
+    const lastName = g0.lastName || b.lastName || b.guestLastName
+      || info["lastname"] || info["last_name"] || "";
     const guestName = (firstName + (lastName ? ` ${lastName}` : ""));
-    const phone = guest.phone || b.phone || "";
-    const email = guest.email || b.email || null;
+    const phone = g0.phone || g0.mobile || b.phone || b.mobile
+      || info["phone"] || info["mobile"] || "";
+    const email = g0.email || b.email || info["email"] || null;
     const isCancelled = b.status === "cancelled" || b.status === "black";
 
     const { data: existing } = await supabaseAdmin
@@ -83,7 +102,7 @@ export async function POST(req: Request) {
     if (isCancelled) {
       if (existing && existing.status !== "CANCELLED") {
         await supabaseAdmin.from("Reservation")
-          .update({ status: "CANCELLED" }).eq("id", existing.id);
+          .update({ status: "CANCELLED", cancelledAt: new Date().toISOString() }).eq("id", existing.id);
         cancelled++;
       } else {
         skipped++;
@@ -100,7 +119,7 @@ export async function POST(req: Request) {
     const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
 
     if (existing) {
-      await supabaseAdmin.from("Reservation").update({
+      const { error: updErr } = await supabaseAdmin.from("Reservation").update({
         guestName: guestName.trim() || "Beds24 гост",
         phone: phone || "",
         email: email || null,
@@ -115,9 +134,10 @@ export async function POST(req: Request) {
         source: detectedSource,
         ...(pricePerNight != null ? { pricePerNight } : {}),
       }).eq("id", existing.id);
-      updated++;
+      if (updErr) { console.error(`[beds24 import] update failed for ${externalRef}:`, updErr.message); skipped++; }
+      else updated++;
     } else {
-      await supabaseAdmin.from("Reservation").upsert({
+      const { error: upsErr } = await supabaseAdmin.from("Reservation").upsert({
         guestName: guestName.trim() || "Beds24 гост",
         phone: phone || "",
         email: email || null,
@@ -133,7 +153,8 @@ export async function POST(req: Request) {
         children: numChild,
         ...(pricePerNight != null ? { pricePerNight } : {}),
       }, { onConflict: "externalRef" });
-      inserted++;
+      if (upsErr) { console.error(`[beds24 import] upsert failed for ${externalRef}:`, upsErr.message); skipped++; }
+      else inserted++;
     }
   }
 
@@ -145,7 +166,7 @@ export async function POST(req: Request) {
     // Only create a notification when something actually changed —
     // prevents spam when auto-sync calls this endpoint every 30s
     if (inserted > 0 || cancelled > 0) {
-      await supabaseAdmin.from("Notification").insert({
+      await notify({
         type: "IMPORT",
         title: `Beds24 · Масов импорт`,
         detail: `Нови: ${inserted} · Обновени: ${updated} · Анулирани: ${cancelled} · Пропуснати: ${skipped}`,

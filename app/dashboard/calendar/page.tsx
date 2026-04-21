@@ -63,7 +63,7 @@ function resStyle(r: { id: string; source: string }) {
   return { bg, bd, tx };
 }
 
-const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", arrivalTime:"14:00", departTime:"11:00" };
+const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", cots:"0", arrivalTime:"14:00", departTime:"11:00" };
 
 // ── main component ────────────────────────────────────────────────────────────
 export default function CalendarPage() {
@@ -85,8 +85,19 @@ export default function CalendarPage() {
   const [cancelConfirm, setCancelConfirm] = useState<any>(null);
   const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
   const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|null>(null);
+  const [msgSending, setMsgSending] = useState<"welcome"|"farewell"|null>(null);
+  const [msgPreview, setMsgPreview] = useState<{type:"welcome"|"farewell", resId:string, emailHtml:string, emailSubject:string, waText:string, phone:string, email:string}|null>(null);
+  const [editableWaText, setEditableWaText] = useState("");
+  const [previewTab, setPreviewTab] = useState<"email"|"whatsapp">("email");
   const lastFetchRef = useRef<string>("");
   const [syncing, setSyncing] = useState(false);
+  const [autoSync, setAutoSync] = useState(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("sp_autoSync");
+      return saved !== "off"; // default ON
+    }
+    return true;
+  });
 
   // Form state
   const [form, setForm] = useState<any>({...EMPTY_FORM});
@@ -121,10 +132,10 @@ export default function CalendarPage() {
             const prevIds = new Set(prev.map((r:any)=>r.id));
             const newOnes = data.filter((r:any) => !prevIds.has(r.id));
             for (const n of newOnes) {
-              if (Notification.permission === "granted") {
+              if (typeof Notification !== "undefined" && Notification.permission === "granted") {
                 new Notification("Нова резервация", {
                   body: `${n.guestName} · Стая ${n.roomCode} · ${n.startDate?.slice(0,10)} – ${n.endDate?.slice(0,10)}`,
-                  icon: "/favicon.ico",
+                  icon: "/icon-192.png",
                   tag: `res-${n.id}`,
                 });
               }
@@ -147,7 +158,7 @@ export default function CalendarPage() {
     syncingRef.current = true;
     setSyncing(true);
     try {
-      const res = await fetch("/api/integrations/beds24/import", { method: "POST" });
+      const res = await fetch("/api/integrations/beds24/poll");
       if (res.ok) {
         await load();
       }
@@ -157,16 +168,122 @@ export default function CalendarPage() {
   }, [load]);
 
   useEffect(() => {
+    if (!autoSync) return; // auto-sync disabled — skip polling entirely
     syncNow(); // immediate first sync on page load
     const iv = setInterval(syncNow, 30_000); // every 30 seconds
     return () => clearInterval(iv);
-  }, [syncNow]);
+  }, [syncNow, autoSync]);
 
-  // ── Request notification permission on mount ─────────────────────────────
+  // ── Service Worker + Push subscription ──────────────────────────────────
+  const [pushState, setPushState] = useState<"loading"|"subscribed"|"unsubscribed"|"unsupported">("loading");
+  const swRegRef = useRef<ServiceWorkerRegistration | null>(null);
+
   useEffect(() => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setPushState("unsupported");
+      return;
+    }
+    // Register SW + check existing subscription
+    navigator.serviceWorker.register("/sw.js").then(async (reg) => {
+      swRegRef.current = reg;
+      const sub = await reg.pushManager.getSubscription();
+      setPushState(sub ? "subscribed" : "unsubscribed");
+    }).catch(() => setPushState("unsupported"));
+
+    // Also request notification permission
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission();
     }
+  }, []);
+
+  const togglePush = useCallback(async () => {
+    if (!swRegRef.current) return;
+    try {
+      const reg = swRegRef.current;
+      const existing = await reg.pushManager.getSubscription();
+
+      if (existing) {
+        // Unsubscribe
+        await existing.unsubscribe();
+        await fetch("/api/push/subscribe", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: existing.endpoint }),
+        });
+        setPushState("unsubscribed");
+      } else {
+        // Subscribe
+        const perm = await Notification.requestPermission();
+        if (perm !== "granted") return;
+
+        const vapidRes = await fetch("/api/push/vapid");
+        if (!vapidRes.ok) return;
+        const { publicKey } = await vapidRes.json();
+
+        // Convert VAPID key to Uint8Array
+        const padding = "=".repeat((4 - (publicKey.length % 4)) % 4);
+        const raw = atob(publicKey.replace(/-/g, "+").replace(/_/g, "/") + padding);
+        const arr = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: arr,
+        });
+        const json = sub.toJSON();
+        await fetch("/api/push/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            endpoint: json.endpoint,
+            keys: json.keys,
+            label: navigator.userAgent.slice(0, 80),
+          }),
+        });
+        setPushState("subscribed");
+      }
+    } catch (e) {
+      console.error("[push] toggle failed:", e);
+    }
+  }, []);
+
+  // ── ALERT notifications — poll for urgent alerts (cots, late check-in) ──
+  const [urgentAlerts, setUrgentAlerts] = useState<any[]>([]);
+  const seenAlertIdsRef = useRef<Set<string>>(new Set());
+  const dismissedAlertIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/notifications");
+        if (!res.ok) return;
+        const all: any[] = await res.json();
+        const alerts = all.filter((n: any) => n.type === "ALERT");
+        // Show undismissed alerts in the banner
+        setUrgentAlerts(alerts.filter((a: any) => !dismissedAlertIdsRef.current.has(a.id)));
+        // Fire browser push for any we haven't seen yet
+        for (const a of alerts) {
+          if (seenAlertIdsRef.current.has(a.id)) continue;
+          seenAlertIdsRef.current.add(a.id);
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            new Notification(a.title || "Специално известие", {
+              body: a.detail || "",
+              icon: "/favicon.ico",
+              tag: `alert-${a.id}`,
+              requireInteraction: true,
+            });
+          }
+        }
+      } catch {}
+    };
+    poll(); // immediate
+    const iv = setInterval(poll, 10_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const dismissAlert = useCallback((id: string) => {
+    dismissedAlertIdsRef.current.add(id);
+    setUrgentAlerts(prev => prev.filter(a => a.id !== id));
   }, []);
 
   // ── Open voice modal from URL query param (?voice=1) ────────────────────
@@ -193,6 +310,7 @@ export default function CalendarPage() {
         notes: voiceParsed?.notes || "",
         guests: voiceParsed?.guests || "2",
         children: voiceParsed?.children != null ? String(voiceParsed.children) : "0",
+        cots: voiceParsed?.cots != null ? String(voiceParsed.cots) : "0",
         pricePerNight: voiceParsed?.pricePerNight || 80,
         arrivalTime: voiceParsed?.arrivalTime || "14:00",
         departTime: voiceParsed?.departureTime || "11:00",
@@ -215,6 +333,7 @@ export default function CalendarPage() {
         pricePerNight: editingRes.pricePerNight || 80,
         guests: String(editingRes.guests || 2),
         children: String(editingRes.children || 0),
+        cots: String(editingRes.cots || 0),
         arrivalTime: editingRes.arrivalTime || "14:00",
         departTime: editingRes.departTime || "11:00",
       });
@@ -253,9 +372,12 @@ export default function CalendarPage() {
   // ── calendar grid ─────────────────────────────────────────────────────────
   const calGrid = useMemo(() => {
     const first = new Date(yr, mo, 1);
-    const off = (first.getDay()+6)%7;
+    const off = (first.getDay()+6)%7; // days from Mon to first of month
+    const daysInMonth = new Date(yr, mo + 1, 0).getDate();
+    const totalCells = off + daysInMonth; // leading blanks + actual days
+    const rows = Math.ceil(totalCells / 7);
     const start = addD(first, -off);
-    return Array.from({length:42}, (_,i) => addD(start, i));
+    return Array.from({length: rows * 7}, (_,i) => addD(start, i));
   }, [yr, mo]);
 
   // ── timeline ──────────────────────────────────────────────────────────────
@@ -513,7 +635,7 @@ export default function CalendarPage() {
   // ── save reservation ──────────────────────────────────────────────────────
   async function saveRes() {
     if (!form.guestName.trim() || !form.roomCode || !form.startDate || !form.endDate) return;
-    const payload = { ...form, guests: Number(form.guests)||1, children: Number(form.children)||0, pricePerNight: Number(form.pricePerNight)||0 };
+    const payload = { ...form, guests: Number(form.guests)||1, children: Number(form.children)||0, cots: Number(form.cots)||0, pricePerNight: Number(form.pricePerNight)||0 };
 
     let res;
     if (editingRes) {
@@ -554,6 +676,78 @@ export default function CalendarPage() {
     await load();
   }
 
+  // ── change guest language on reservation ─────────────────────────────────
+  async function changeGuestLang(resId: string, lang: string) {
+    await fetch(`/api/reservations/${resId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ guestLang: lang }),
+    });
+    if (editingRes) setEditingRes({ ...editingRes, guestLang: lang });
+  }
+
+  // ── open message preview modal ──────────────────────────────────────────
+  async function openMsgPreview(resId: string, type: "welcome" | "farewell") {
+    setMsgSending(type);
+    try {
+      const resp = await fetch("/api/messages/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservationId: resId, type }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || "Грешка при зареждане на шаблон");
+        setMsgSending(null);
+        return;
+      }
+      setMsgPreview({ type, resId, emailHtml: data.emailHtml, emailSubject: data.emailSubject, waText: data.waText, phone: data.phone, email: data.email });
+      setEditableWaText(data.waText);
+      setPreviewTab("email");
+    } catch (e: any) {
+      alert("Грешка: " + (e.message || "Неуспешно зареждане"));
+    }
+    setMsgSending(null);
+  }
+
+  // ── send email from preview modal ─────────────────────────────────────────
+  async function sendEmailFromPreview() {
+    if (!msgPreview) return;
+    setMsgSending(msgPreview.type);
+    try {
+      const resp = await fetch("/api/messages/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reservationId: msgPreview.resId, type: msgPreview.type, customWaText: editableWaText }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || "Грешка при изпращане");
+        setMsgSending(null);
+        return;
+      }
+      const parts: string[] = [];
+      if (data.emailSent) parts.push("Email изпратен успешно");
+      if (data.emailError) parts.push("Email: " + data.emailError);
+      alert(parts.join("\n"));
+      await load();
+    } catch (e: any) {
+      alert("Грешка: " + (e.message || "Неуспешно изпращане"));
+    }
+    setMsgSending(null);
+  }
+
+  // ── open WhatsApp with edited text ────────────────────────────────────────
+  function openWhatsAppFromPreview() {
+    if (!msgPreview || !msgPreview.phone) {
+      alert("Няма телефонен номер");
+      return;
+    }
+    const cleaned = msgPreview.phone.replace(/[^\d+]/g, "").replace(/^\+/, "");
+    const url = `https://wa.me/${cleaned}?text=${encodeURIComponent(editableWaText)}`;
+    window.open(url, "_blank");
+  }
+
   const activeToday = activeOn(sel);
   const coToday = checkouts(sel);
   const todayStr = toDS(now);
@@ -584,6 +778,26 @@ export default function CalendarPage() {
       onVoice={() => setVoiceOpen(true)}
     >
       <style dangerouslySetInnerHTML={{__html: mobileCSS}} />
+      {/* ── URGENT ALERT BANNER ──────────────────────────────────────── */}
+      {urgentAlerts.length > 0 && (
+        <div style={{ background:"#fef2f2", borderBottom:"2px solid #f87171", padding:"0" }}>
+          {urgentAlerts.map((a: any) => (
+            <div key={a.id} style={{ display:"flex", alignItems:"center", gap:"10px", padding:"10px 18px", borderBottom:"1px solid #fecaca" }}>
+              <span style={{ fontSize:"20px", lineHeight:1 }}>⚠</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontWeight:700, fontSize:"14px", color:"#991b1b" }}>{a.title?.replace(/^⚠\s*/, "")}</div>
+                <div style={{ fontSize:"13px", color:"#b91c1c", marginTop:"2px" }}>{a.detail}</div>
+              </div>
+              <button
+                onClick={() => dismissAlert(a.id)}
+                style={{ background:"#fff", border:"1px solid #fca5a5", borderRadius:"6px", padding:"4px 12px", fontSize:"12px", color:"#991b1b", cursor:"pointer", fontWeight:600, whiteSpace:"nowrap" }}
+              >
+                OK
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
         {/* TOPBAR */}
         <div className="topbar-wrap" style={{ background:"#fff", borderBottom:"1px solid #e5e2dc", padding:"10px 18px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"10px", flexWrap:"wrap", flexShrink:0 }}>
@@ -604,14 +818,23 @@ export default function CalendarPage() {
                 </button>
               );
             })}
-            <div style={{ display:"flex", alignItems:"center", gap:"5px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"7px", padding:"5px 10px", fontSize:"11px", color:"#15803d" }}>
-              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#22c55e", animation:"pulse 2s infinite" }} />
-              Beds24 · 30с
+            <div style={{ display:"flex", alignItems:"center", gap:"5px", background: autoSync ? "#f0fdf4" : "#fef2f2", border: `1px solid ${autoSync ? "#bbf7d0" : "#fecaca"}`, borderRadius:"7px", padding:"5px 10px", fontSize:"11px", color: autoSync ? "#15803d" : "#991b1b", cursor:"pointer", userSelect:"none" }}
+              onClick={() => { const next = !autoSync; setAutoSync(next); localStorage.setItem("sp_autoSync", next ? "on" : "off"); }}
+              title={autoSync ? "Натисни за изключване на авто-синхронизация" : "Натисни за включване на авто-синхронизация"}>
+              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background: autoSync ? "#22c55e" : "#ef4444", animation: autoSync ? "pulse 2s infinite" : "none" }} />
+              {autoSync ? "Auto · 30с" : "Auto · Изкл."}
             </div>
             <button onClick={syncNow} disabled={syncing}
               style={{ background: syncing ? "#fef3c7" : "#eff6ff", color: syncing ? "#92400e" : "#1d4ed8", border: `1px solid ${syncing ? "#fcd34d" : "#93c5fd"}`, borderRadius:"7px", padding:"5px 12px", fontSize:"11px", fontWeight:"600", cursor: syncing ? "default" : "pointer", opacity: syncing ? 0.8 : 1 }}>
               {syncing ? "Синхр..." : "Sync"}
             </button>
+            {pushState !== "unsupported" && (
+              <button onClick={togglePush} disabled={pushState === "loading"}
+                style={{ background: pushState === "subscribed" ? "#f0fdf4" : "#fef2f2", color: pushState === "subscribed" ? "#15803d" : "#991b1b", border: `1px solid ${pushState === "subscribed" ? "#bbf7d0" : "#fecaca"}`, borderRadius:"7px", padding:"5px 10px", fontSize:"11px", cursor:"pointer", fontWeight:600 }}
+                title={pushState === "subscribed" ? "Push известия включени — натисни за изключване" : "Включи push известия на това устройство"}>
+                {pushState === "subscribed" ? "Push ON" : pushState === "loading" ? "..." : "Push OFF"}
+              </button>
+            )}
             <button onClick={() => openNewRes(toDS(now))}
               style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"7px 14px", fontSize:"12px", fontWeight:"600", cursor:"pointer" }}>
               + Нова резервация
@@ -632,9 +855,12 @@ export default function CalendarPage() {
                 const isSel = ds === sel;
                 const isToday = ds === todayStr;
                 const dr = outside ? [] : activeOn(ds);
+                if (outside) return (
+                  <div key={ds} style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", minHeight:"120px", background:"#fafaf8" }} />
+                );
                 return (
-                  <div key={ds} onClick={() => { if (!outside) { setSel(ds); openNewRes(ds); } }}
-                    style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", padding:"7px 6px", minHeight:"120px", cursor: outside ? "default" : "pointer", background: isSel && !outside ? "#f0efff" : "white", outline: isSel && !outside ? "2px solid #6c63ff" : "none", outlineOffset:"-2px", opacity: outside ? 0.35 : 1, transition:"background .1s" }}>
+                  <div key={ds} onClick={() => { setSel(ds); openNewRes(ds); }}
+                    style={{ borderRight:"1px solid #f0ede8", borderBottom:"1px solid #f0ede8", padding:"7px 6px", minHeight:"120px", cursor:"pointer", background: isSel ? "#f0efff" : "white", outline: isSel ? "2px solid #6c63ff" : "none", outlineOffset:"-2px", transition:"background .1s" }}>
                     <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"5px" }}>
                       <span style={{ fontSize:"12px", fontWeight:"600", color: isToday ? "#fff" : outside ? "#bbb" : "#333", background: isToday ? "#6c63ff" : "transparent", borderRadius: isToday ? "50%" : "0", width: isToday ? "21px" : "auto", height: isToday ? "21px" : "auto", display:"flex", alignItems:"center", justifyContent:"center" }}>{dt.getDate()}</span>
                       {dr.length > 0 && <span style={{ fontSize:"10px", background:"#6c63ff", color:"#fff", borderRadius:"4px", padding:"1px 5px", fontWeight:"600" }}>{dr.length}</span>}
@@ -802,6 +1028,7 @@ export default function CalendarPage() {
                     { label:"Email", id:"email", placeholder:"guest@example.com" },
                     { label:"Брой възрастни", id:"guests", placeholder:"2", type:"number" },
                     { label:"Брой деца", id:"children", placeholder:"0", type:"number" },
+                    { label:"Кошари (до 3г.)", id:"cots", placeholder:"0", type:"number" },
                     { label:"Дата начало", id:"startDate", type:"date" },
                     { label:"Дата край", id:"endDate", type:"date" },
                     { label:"Час пристигане", id:"arrivalTime", type:"time" },
@@ -842,6 +1069,9 @@ export default function CalendarPage() {
                       {editingRes && !availableRooms.find((r:any) => r.code === form.roomCode) && form.roomCode && (
                         <option value={form.roomCode}>{form.roomCode} (текуща стая)</option>
                       )}
+                      {!editingRes && voiceParsed?.room && !availableRooms.find((r:any) => r.code === form.roomCode) && form.roomCode && (
+                        <option value={form.roomCode}>{form.roomCode} (от глас)</option>
+                      )}
                     </select>
                   </div>
                   <div>
@@ -859,9 +1089,9 @@ export default function CalendarPage() {
                 </div>
                 <div style={{ background:"#f5f3ff", border:"1px solid #ddd3fe", borderRadius:"8px", padding:"9px 13px", marginTop:"9px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                   <div style={{ fontSize:"12px", color:"#6c63ff" }}>
-                    {nights} нощи · {Number(form.guests)||0} възр. · {Number(form.children)||0} деца
+                    {nights} нощи · {Number(form.guests)||0} възр. · {Number(form.children)||0} деца{(Number(form.children)||0) > 0 ? ` (+€${((Number(form.children)||0) * 12.5).toFixed(2)}/нощ)` : ""}{(Number(form.cots)||0) > 0 ? ` · ${Number(form.cots)} кош. (+€${((Number(form.cots)||0) * 25).toFixed(2)}/нощ)` : ""}
                   </div>
-                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round((Number(form.pricePerNight)||0) * nights)}</div>
+                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round(((Number(form.pricePerNight)||0) + (Number(form.children)||0) * 12.5 + (Number(form.cots)||0) * 25) * nights)}</div>
                 </div>
                 <div style={{ display:"flex", gap:"7px", marginTop:"11px", flexWrap:"wrap" }}>
                   <button onClick={saveRes} style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>
@@ -874,6 +1104,54 @@ export default function CalendarPage() {
                   )}
                   <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer" }}>Затвори</button>
                 </div>
+                {/* ── Message buttons (only when editing existing reservation) ── */}
+                {editingRes && editingRes.status !== "CANCELLED" && (
+                  <div style={{ marginTop:"11px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"8px", padding:"10px 13px" }}>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"8px" }}>
+                      <div style={{ fontSize:"11px", fontWeight:"700", color:"#15803d", letterSpacing:".3px" }}>СЪОБЩЕНИЯ</div>
+                      <div style={{ display:"flex", alignItems:"center", gap:"6px" }}>
+                        <label style={{ fontSize:"11px", color:"#6b7280" }}>Език:</label>
+                        <select
+                          value={editingRes.guestLang || "en"}
+                          onChange={(e) => changeGuestLang(editingRes.id, e.target.value)}
+                          style={{ fontSize:"12px", padding:"3px 6px", borderRadius:"6px", border:"1px solid #bbf7d0", background:"#fff", color:"#122943", cursor:"pointer" }}>
+                          <option value="en">🇬🇧 English</option>
+                          <option value="bg">🇧🇬 Български</option>
+                          <option value="de">🇩🇪 Deutsch</option>
+                          <option value="fr">🇫🇷 Français</option>
+                          <option value="ru">🇷🇺 Русский</option>
+                          <option value="uk">🇺🇦 Українська</option>
+                          <option value="no">🇳🇴 Norsk</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", gap:"7px", flexWrap:"wrap", alignItems:"center" }}>
+                      <button
+                        disabled={msgSending === "welcome"}
+                        onClick={() => openMsgPreview(editingRes.id, "welcome")}
+                        style={{ background:"#122943", color:"#C9A84C", border:"none", borderRadius:"8px", padding:"8px 14px", fontSize:"12px", fontWeight:"600", cursor: msgSending === "welcome" ? "wait" : "pointer", opacity: msgSending === "welcome" ? .6 : 1, display:"flex", alignItems:"center", gap:"6px" }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                        {msgSending === "welcome" ? "Зареждане..." : "Добре дошли"}
+                      </button>
+                      <button
+                        disabled={msgSending === "farewell"}
+                        onClick={() => openMsgPreview(editingRes.id, "farewell")}
+                        style={{ background:"#C9A84C", color:"#122943", border:"none", borderRadius:"8px", padding:"8px 14px", fontSize:"12px", fontWeight:"600", cursor: msgSending === "farewell" ? "wait" : "pointer", opacity: msgSending === "farewell" ? .6 : 1, display:"flex", alignItems:"center", gap:"6px" }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                        {msgSending === "farewell" ? "Зареждане..." : "Сбогуване"}
+                      </button>
+                    </div>
+                    {/* Sent status indicators */}
+                    <div style={{ display:"flex", gap:"12px", marginTop:"8px", fontSize:"11px", color:"#6b7280" }}>
+                      {editingRes.welcomeSentAt && (
+                        <span style={{ color:"#15803d" }}>Добре дошли: изпратено {new Date(editingRes.welcomeSentAt).toLocaleDateString("bg-BG")} {new Date(editingRes.welcomeSentAt).toLocaleTimeString("bg-BG", { hour:"2-digit", minute:"2-digit" })}</span>
+                      )}
+                      {editingRes.farewellSentAt && (
+                        <span style={{ color:"#15803d" }}>Сбогуване: изпратено {new Date(editingRes.farewellSentAt).toLocaleDateString("bg-BG")} {new Date(editingRes.farewellSentAt).toLocaleTimeString("bg-BG", { hour:"2-digit", minute:"2-digit" })}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {/* Mobile: active reservations shown below buttons */}
                 <div className="modal-mobile-active" style={{ display:"none" }}>
                   <style dangerouslySetInnerHTML={{__html:`@media(max-width:768px){.modal-mobile-active{display:block!important;margin-top:14px}}`}} />
@@ -911,7 +1189,8 @@ export default function CalendarPage() {
                   <>
                     <div style={{ fontSize:"11px", fontWeight:"700", color:"#888", letterSpacing:".4px", textTransform:"uppercase", marginBottom:"8px", paddingBottom:"6px", borderBottom:"1px solid #eee", marginTop:"14px" }}>Освобождавания</div>
                     {coToday.map(r => (
-                      <div key={r.id} style={{ display:"flex", alignItems:"center", gap:"8px", padding:"8px 10px", background:"#fffbf0", borderRadius:"8px", marginBottom:"6px", borderLeft:"3px solid #f59e0b" }}>
+                      <div key={r.id} onClick={(e) => { e.stopPropagation(); setModal(false); setEditingRes(null); setTimeout(() => openEditRes(r), 100); }}
+                        style={{ display:"flex", alignItems:"center", gap:"8px", padding:"8px 10px", background:"#fffbf0", borderRadius:"8px", marginBottom:"6px", borderLeft:"3px solid #f59e0b", cursor:"pointer" }}>
                         <div style={{ fontSize:"12px", fontWeight:"700" }}>{r.guestName}</div>
                         <div style={{ fontSize:"11px", color:"#aaa" }}>Стая {r.roomCode}</div>
                       </div>
@@ -1010,6 +1289,92 @@ export default function CalendarPage() {
         </div>
       )}
 
+      {/* ═══════════ MESSAGE PREVIEW MODAL ═══════════ */}
+      {msgPreview && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.65)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"24px 14px", zIndex:115, overflowY:"auto" }}
+          onClick={e => { if (e.currentTarget===e.target) setMsgPreview(null); }}>
+          <div style={{ background:"#fff", borderRadius:"14px", width:"720px", maxWidth:"100%", overflow:"hidden", border:"1px solid #dedad4", boxShadow:"0 20px 60px rgba(0,0,0,.3)", maxHeight:"90vh", display:"flex", flexDirection:"column" }}>
+            {/* Header */}
+            <div style={{ background:"#122943", padding:"15px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+              <div>
+                <div style={{ fontSize:"15px", fontWeight:"700", color:"#C9A84C" }}>
+                  {msgPreview.type === "welcome" ? "Добре дошли — преглед" : "Сбогуване — преглед"}
+                </div>
+                <div style={{ fontSize:"11px", color:"rgba(255,253,248,0.5)", marginTop:"2px" }}>
+                  {msgPreview.email && `Email: ${msgPreview.email}`}{msgPreview.email && msgPreview.phone ? " · " : ""}{msgPreview.phone && `Тел: ${msgPreview.phone}`}
+                </div>
+              </div>
+              <button onClick={() => setMsgPreview(null)} style={{ background:"#1a3556", color:"#C9A84C", border:"1px solid rgba(201,168,76,0.3)", borderRadius:"7px", width:"28px", height:"28px", cursor:"pointer", fontSize:"17px", display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
+            </div>
+
+            {/* Tabs */}
+            <div style={{ display:"flex", borderBottom:"1px solid #e5e2da", flexShrink:0 }}>
+              <button onClick={() => setPreviewTab("email")}
+                style={{ flex:1, padding:"10px", fontSize:"13px", fontWeight:"600", background: previewTab === "email" ? "#fffdf8" : "#f5f3ee", color: previewTab === "email" ? "#122943" : "#999", border:"none", borderBottom: previewTab === "email" ? "2px solid #C9A84C" : "2px solid transparent", cursor:"pointer" }}>
+                Email
+              </button>
+              <button onClick={() => setPreviewTab("whatsapp")}
+                style={{ flex:1, padding:"10px", fontSize:"13px", fontWeight:"600", background: previewTab === "whatsapp" ? "#fffdf8" : "#f5f3ee", color: previewTab === "whatsapp" ? "#122943" : "#999", border:"none", borderBottom: previewTab === "whatsapp" ? "2px solid #25d366" : "2px solid transparent", cursor:"pointer" }}>
+                WhatsApp
+              </button>
+            </div>
+
+            {/* Content */}
+            <div style={{ flex:1, overflow:"auto" }}>
+              {previewTab === "email" ? (
+                <div style={{ padding:"0" }}>
+                  <div style={{ padding:"12px 16px", fontSize:"12px", color:"#6b7280", background:"#f9f8f5", borderBottom:"1px solid #e5e2da" }}>
+                    <strong>Тема:</strong> {msgPreview.emailSubject}
+                  </div>
+                  <iframe
+                    srcDoc={msgPreview.emailHtml}
+                    style={{ width:"100%", height:"520px", border:"none" }}
+                    sandbox="allow-same-origin"
+                    title="Email preview"
+                  />
+                </div>
+              ) : (
+                <div style={{ padding:"16px" }}>
+                  <label style={{ display:"block", fontSize:"12px", fontWeight:"600", color:"#6b7280", marginBottom:"6px" }}>
+                    Редактирайте текста преди изпращане:
+                  </label>
+                  <textarea
+                    value={editableWaText}
+                    onChange={e => setEditableWaText(e.target.value)}
+                    style={{ width:"100%", minHeight:"320px", padding:"14px", fontSize:"14px", lineHeight:"1.7", border:"1px solid #d1d5db", borderRadius:"10px", fontFamily:"system-ui, sans-serif", resize:"vertical", color:"#122943" }}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Action buttons */}
+            <div style={{ padding:"14px 16px", borderTop:"1px solid #e5e2da", display:"flex", gap:"10px", flexShrink:0, background:"#faf9f7" }}>
+              {previewTab === "email" ? (
+                <button
+                  disabled={!!msgSending || !msgPreview.email}
+                  onClick={sendEmailFromPreview}
+                  style={{ flex:1, background:"#122943", color:"#C9A84C", border:"none", borderRadius:"10px", padding:"11px 18px", fontSize:"13px", fontWeight:"700", cursor: msgSending ? "wait" : "pointer", opacity: msgSending ? .6 : 1, display:"flex", alignItems:"center", justifyContent:"center", gap:"8px" }}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                  {msgSending ? "Изпращане..." : msgPreview.email ? "Изпрати Email" : "Няма email адрес"}
+                </button>
+              ) : (
+                <button
+                  disabled={!msgPreview.phone}
+                  onClick={openWhatsAppFromPreview}
+                  style={{ flex:1, background:"#25d366", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontSize:"13px", fontWeight:"700", cursor: msgPreview.phone ? "pointer" : "not-allowed", opacity: msgPreview.phone ? 1 : .5, display:"flex", alignItems:"center", justifyContent:"center", gap:"8px" }}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.477 2 2 6.477 2 12c0 1.89.525 3.66 1.438 5.168L2 22l4.832-1.438A9.955 9.955 0 0 0 12 22c5.523 0 10-4.477 10-10S17.523 2 12 2zm0 18a8 8 0 0 1-4.243-1.214l-.302-.18-3.13.82.836-3.052-.196-.312A8 8 0 1 1 12 20z"/></svg>
+                  {msgPreview.phone ? "Отвори WhatsApp" : "Няма телефонен номер"}
+                </button>
+              )}
+              <button onClick={() => setMsgPreview(null)}
+                style={{ background:"#f3f4f6", color:"#6b7280", border:"1px solid #d1d5db", borderRadius:"10px", padding:"11px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>
+                Затвори
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══════════ VOICE MODAL ═══════════ */}
       {voiceOpen && (
         <div style={{ position:"fixed", inset:0, background:"rgba(5,5,15,.6)", display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"24px 14px", zIndex:110, overflowY:"auto" }}
@@ -1081,6 +1446,7 @@ export default function CalendarPage() {
                     ["До дата", voiceParsed.end ? fmtS(voiceParsed.end) : null],
                     ["Възрастни", voiceParsed.guests != null ? String(voiceParsed.guests) : null],
                     ["Деца", voiceParsed.children != null ? String(voiceParsed.children) : null],
+                    ["Кошари", voiceParsed.cots != null ? String(voiceParsed.cots) : null],
                     ["Телефон", voiceParsed.phone],
                     ["Email", voiceParsed.email],
                     ["Цена/нощ", voiceParsed.pricePerNight != null ? `€${voiceParsed.pricePerNight}` : null],

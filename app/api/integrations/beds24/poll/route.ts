@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
+import { notify } from "@/lib/notify";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Beds24 polling endpoint — safety net when webhooks fail
@@ -16,7 +17,7 @@ import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 // Beds24's rate limits (their warning targets booking-engine style
 // real-time search across hundreds of properties).
 //
-// Rate limiting: won't run more than once per 90 seconds to prevent
+// Rate limiting: won't run more than once per 20 seconds to prevent
 // multiple browser tabs from hammering the API.
 //
 // No authentication required — it only READS from Beds24 and WRITES to
@@ -27,7 +28,7 @@ const MIN_INTERVAL_MS = 20_000; // 20 seconds between polls
 const CANCELLED_STATUSES = new Set(["cancelled", "black"]);
 
 export async function GET() {
-  // ── Rate limit: skip if last poll was < 90s ago ──
+  // ── Rate limit: skip if last poll was < 20s ago ──
   try {
     const { data: lastSync } = await supabaseAdmin
       .from("SyncEvent")
@@ -87,11 +88,23 @@ export async function GET() {
 
       const externalRef = `beds24-${b.id}`;
       const g0 = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
-      const firstName = g0.firstName || b.firstName || b.guestFirstName || "";
-      const lastName = g0.lastName || b.lastName || b.guestLastName || "";
+
+      // Build infoItems lookup (code → text) for fallback
+      const info: Record<string, string> = {};
+      if (Array.isArray(b.infoItems)) {
+        for (const item of b.infoItems) {
+          if (item?.code && item?.text) info[String(item.code).toLowerCase()] = String(item.text);
+        }
+      }
+
+      const firstName = g0.firstName || b.firstName || b.guestFirstName
+        || info["firstname"] || info["first_name"] || "";
+      const lastName = g0.lastName || b.lastName || b.guestLastName
+        || info["lastname"] || info["last_name"] || "";
       const guestName = (firstName + (lastName ? ` ${lastName}` : "")).trim() || "Beds24 гост";
-      const phone = g0.phone || b.phone || "";
-      const email = g0.email || b.email || null;
+      const phone = g0.phone || g0.mobile || b.phone || b.mobile
+        || info["phone"] || info["mobile"] || "";
+      const email = g0.email || b.email || info["email"] || null;
       const isCancelled = CANCELLED_STATUSES.has(b.status);
       const numAdult = Math.max(1, Number(b.numAdult || g0.numAdult) || 1);
       const numChild = Math.max(0, Number(b.numChild || g0.numChild) || 0);
@@ -113,6 +126,14 @@ export async function GET() {
           await supabaseAdmin.from("Reservation")
             .update({ status: "CANCELLED", cancelledAt: new Date().toISOString() })
             .eq("id", existing.id);
+          try {
+            await notify({
+              type: "CANCEL",
+              title: `Beds24 · Poll · Анулиране · ${roomCode}`,
+              detail: `${guestName} · ${arrival} – ${departure}`,
+              reservationId: existing.id,
+            });
+          } catch { /* non-fatal */ }
           cancelled++;
         } else {
           skipped++;
@@ -166,7 +187,7 @@ export async function GET() {
   // No per-booking notifications — prevents spam if poll runs multiple times
   if (newBookings.length > 0) {
     try {
-      await supabaseAdmin.from("Notification").insert({
+      await notify({
         type: "NEW",
         title: `Beds24 · Poll · ${newBookings.length} нови резервации`,
         detail: newBookings.join(" | "),

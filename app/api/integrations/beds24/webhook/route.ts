@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 import { detectBookingSource, extractBookingPrice } from "@/lib/beds24";
+import { notify as notifyPush } from "@/lib/notify";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Beds24 → StayPilot inbound webhook handler
@@ -173,7 +174,10 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
   }
 
   // ── Extract guest info ──
-  const guest = extractGuest(b);
+  // Pass payload.infoItems as fallback — in v2 booking webhooks, guest
+  // personal data (firstName, lastName, phone, email) may be in infoItems[]
+  // at the payload level rather than directly on the booking object.
+  const guest = extractGuest(b, payload?.infoItems);
   const isCancelled = CANCELLED_STATUSES.has(b.status);
 
   // ── Extract source & price from Beds24 v2 fields ──
@@ -212,8 +216,14 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
     });
     await logSync("PROCESSED", {
       via: "booking-webhook", bookingId, roomCode,
-      guest: guest.name, status: b.status,
-      source: detectedSource, totalPrice, pricePerNight,
+      guest: guest.name, phone: guest.phone, email: guest.email,
+      status: b.status, numAdult: guest.numAdult, numChild: guest.numChild,
+      source: detectedSource, channel: b.channel || null,
+      totalPrice, pricePerNight, commission: b.commission || null,
+      hasGuests: Array.isArray(b.guests) && b.guests.length > 0,
+      hasInfoItems: Array.isArray(payload?.infoItems) && payload.infoItems.length > 0,
+      bookingKeys: Object.keys(b || {}).sort().join(","),
+      payloadTopKeys: Object.keys(payload || {}).sort().join(","),
       ...result, durationMs: Date.now() - startMs,
     });
     return NextResponse.json({ ok: true, bookingId, roomCode, ...result });
@@ -431,12 +441,15 @@ function parseDates(
 }
 
 // ─── Guest extraction ────────────────────────────────────────────────────
-// Guest info may be:
-//   - Top-level: firstName, lastName, phone, email (always present in v2)
-//   - Nested in guests[] array (when includeGuests=true on API fetch)
-// We check both, preferring guests[0] if present.
+// Guest info may come from THREE sources (checked in priority order):
+//   1. guests[] array (when includeGuests=true on API fetch, or in webhook)
+//   2. Top-level booking fields: firstName, lastName, phone, email
+//   3. infoItems[] — key-value pairs at the webhook payload level
+//      (Beds24 v2 Swagger: code="firstname"|"lastname"|"phone"|"email",
+//       text="<value>"). This is the canonical source for guest personal
+//       data in booking webhooks per the v2 schema.
 
-function extractGuest(b: any): {
+function extractGuest(b: any, infoItems?: any[]): {
   name: string;
   phone: string;
   email: string | null;
@@ -445,14 +458,32 @@ function extractGuest(b: any): {
 } {
   const g0 = Array.isArray(b.guests) && b.guests.length > 0 ? b.guests[0] : {};
 
-  const firstName = g0.firstName || b.firstName || b.guestFirstName || "";
-  const lastName = g0.lastName || b.lastName || b.guestLastName || "";
+  // Build a lookup from infoItems (code → text) for fallback.
+  // Beds24 uses lowercase codes: "firstname", "lastname", "phone", "email".
+  // infoItems can come from: payload.infoItems (webhook) OR b.infoItems (API fetch with includeInfoItems=true)
+  const rawInfoItems = infoItems || b.infoItems;
+  const info: Record<string, string> = {};
+  if (Array.isArray(rawInfoItems)) {
+    for (const item of rawInfoItems) {
+      if (item?.code && item?.text) info[String(item.code).toLowerCase()] = String(item.text);
+    }
+  }
+
+  const firstName = g0.firstName || b.firstName || b.guestFirstName
+    || info["firstname"] || info["first_name"] || "";
+  const lastName = g0.lastName || b.lastName || b.guestLastName
+    || info["lastname"] || info["last_name"] || "";
   const name = (firstName + (lastName ? ` ${lastName}` : "")).trim() || "Beds24 гост";
+
+  // Beds24 v2 has both `phone` and `mobile` fields at top level and in guests[]
+  const phone = g0.phone || g0.mobile || b.phone || b.mobile
+    || info["phone"] || info["mobile"] || "";
+  const email = g0.email || b.email || info["email"] || null;
 
   return {
     name,
-    phone: g0.phone || b.phone || "",
-    email: g0.email || b.email || null,
+    phone,
+    email,
     numAdult: Math.max(1, Number(b.numAdult || g0.numAdult) || 1),
     numChild: Math.max(0, Number(b.numChild || g0.numChild) || 0),
   };
@@ -496,13 +527,15 @@ async function upsertReservation(input: {
   // ── Case 1: Cancellation ──
   if (input.isCancelled) {
     if (existing && existing.status !== "CANCELLED") {
-      await supabaseAdmin
+      const { error: cancelErr } = await supabaseAdmin
         .from("Reservation")
         .update({ status: "CANCELLED", cancelledAt: new Date().toISOString() })
         .eq("id", existing.id);
+      if (cancelErr) console.error("[beds24-wh] cancel update failed:", cancelErr.message);
       await notify("CANCEL",
         `Beds24 · Анулиране · ${input.roomCode}`,
         `Резервация ${input.externalRef.replace("beds24-", "#")} анулирана`,
+        existing.id,
       );
       return { action: "cancelled" };
     }
@@ -529,37 +562,46 @@ async function upsertReservation(input: {
 
   // ── Case 2: Update existing ──
   if (existing) {
-    await supabaseAdmin
+    const { error: updateErr } = await supabaseAdmin
       .from("Reservation")
       .update(row)
       .eq("id", existing.id);
+    if (updateErr) console.error("[beds24-wh] update failed:", updateErr.message);
     await notify("SYSTEM",
       `Beds24 · Промяна · ${input.roomCode}`,
       `${input.guestName} · ${input.arrivalRaw} – ${input.departureRaw}`,
+      existing.id,
     );
     return { action: "updated" };
   }
 
   // ── Case 3: New reservation ──
-  await supabaseAdmin
+  const { data: inserted, error: upsertErr } = await supabaseAdmin
     .from("Reservation")
     .upsert(
       { ...row, externalRef: input.externalRef },
       { onConflict: "externalRef" },
-    );
+    )
+    .select("id")
+    .single();
+  if (upsertErr) {
+    console.error("[beds24-wh] upsert failed:", upsertErr.message);
+    throw new Error(`upsert failed: ${upsertErr.message}`);
+  }
   await notify("NEW",
     `Beds24 · Нова резервация · ${input.roomCode}`,
     `${input.guestName} · ${input.arrivalRaw} – ${input.departureRaw}`,
+    inserted?.id,
   );
   return { action: "inserted" };
 }
 
-// ─── Notification helper ─────────────────────────────────────────────────
+// ─── Notification helper (wraps global notify with positional args) ──────
 
-async function notify(type: string, title: string, detail: string) {
+async function notify(type: string, title: string, detail: string, reservationId?: string) {
   try {
-    await supabaseAdmin.from("Notification").insert({ type, title, detail });
-  } catch { /* notifications must never break the webhook */ }
+    await notifyPush({ type, title, detail, reservationId });
+  } catch (e) { console.warn("[beds24-wh] notify failed:", e); }
 }
 
 // ─── SyncEvent logger ────────────────────────────────────────────────────
@@ -678,6 +720,7 @@ async function fetchPropertyBookings(
   url.searchParams.set("departureFrom", from);    // catches guests still in-house
   url.searchParams.set("arrivalTo", to);           // caps the future window
   url.searchParams.set("includeInvoiceItems", "true");
+  url.searchParams.set("includeInfoItems", "true");
   url.searchParams.set("includeGuests", "true");
 
   const fetchStartMs = Date.now();

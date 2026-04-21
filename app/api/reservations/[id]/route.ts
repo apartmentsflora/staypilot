@@ -5,7 +5,9 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getSession } from "@/lib/auth";
 import { updateBeds24Booking, cancelBeds24Booking } from "@/lib/beds24";
+import { notify } from "@/lib/notify";
 
+// .strict() strips unknown fields — prevents injection of arbitrary DB columns
 const PatchInput = z.object({
   guestName: z.string().trim().min(1).max(120).optional(),
   phone: z.string().trim().max(40).optional(),
@@ -19,15 +21,17 @@ const PatchInput = z.object({
   source: z.string().trim().max(40).optional(),
   guests: z.any().optional(),
   children: z.any().optional(),
+  cots: z.any().optional(),
   pricePerNight: z.any().optional(),
   arrivalTime: z.string().optional(),
   departTime: z.string().optional(),
-}).passthrough();
+  guestLang: z.enum(["en","bg","de","fr","ru","uk","no"]).optional(),
+}).strip();
 
-function normalizeDate(v: string | undefined): string | undefined {
+function normalizeDate(v: string | undefined): string | null | undefined {
   if (!v) return undefined;
   const d = new Date(v.length <= 10 ? v + "T00:00:00Z" : v);
-  if (isNaN(d.getTime())) return undefined;
+  if (isNaN(d.getTime())) return null; // null signals invalid
   return d.toISOString();
 }
 
@@ -42,14 +46,34 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     return NextResponse.json({ error: "Validation failed", issues: parsed.error.issues }, { status: 400 });
   }
   const update: Record<string, any> = { ...parsed.data };
-  if (update.startDate) update.startDate = normalizeDate(update.startDate);
-  if (update.endDate)   update.endDate   = normalizeDate(update.endDate);
 
-  // If roomCode changed, resolve the new room ID
+  // Validate and normalize dates — return 400 for invalid dates instead of silently ignoring
+  if (update.startDate) {
+    const norm = normalizeDate(update.startDate);
+    if (norm === null) return NextResponse.json({ error: "Invalid startDate" }, { status: 400 });
+    update.startDate = norm;
+  }
+  if (update.endDate) {
+    const norm = normalizeDate(update.endDate);
+    if (norm === null) return NextResponse.json({ error: "Invalid endDate" }, { status: 400 });
+    update.endDate = norm;
+  }
+
+  // If roomCode changed, resolve the new room ID — fail if room not found
   if (update.roomCode) {
     const { data: newRoom } = await supabaseAdmin
       .from("Room").select("id").eq("code", update.roomCode).maybeSingle();
-    if (newRoom) update.roomId = newRoom.id;
+    if (!newRoom) return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    update.roomId = newRoom.id;
+  }
+
+  // If cancelling, set cancelledAt in the same update (not a separate query)
+  if (update.status === "CANCELLED") {
+    update.cancelledAt = new Date().toISOString();
+  }
+  // If reverting a cancellation, clear cancelledAt in the same update
+  if (update.status === "CONFIRMED") {
+    update.cancelledAt = null;
   }
 
   const { data, error } = await supabaseAdmin
@@ -62,14 +86,8 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   if (!data) return NextResponse.json({ error: "Reservation not found" }, { status: 404 });
 
   if (update.status === "CANCELLED") {
-    // Set cancelledAt timestamp for 24h revert window
     try {
-      await supabaseAdmin.from("Reservation")
-        .update({ cancelledAt: new Date().toISOString() })
-        .eq("id", params.id);
-    } catch {}
-    try {
-      await supabaseAdmin.from("Notification").insert({
+      await notify({
         type: "CANCEL",
         title: `Анулирана резервация · ${data.roomCode}`,
         detail: `${data.guestName} · ${String(data.startDate).slice(0, 10)} – ${String(data.endDate).slice(0, 10)}`,
@@ -80,29 +98,22 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     }
   }
 
-  // If reverting a cancellation
-  if (update.status === "CONFIRMED" && data.cancelledAt) {
+  // Outbound Beds24 push — only for reservations that originated from Beds24.
+  if (data.externalRef && String(data.externalRef).startsWith("beds24-")) {
     try {
-      await supabaseAdmin.from("Reservation")
-        .update({ cancelledAt: null })
-        .eq("id", params.id);
-    } catch {}
-  }
-
-  // Outbound Beds24 push — update or cancel depending on status.
-  try {
-    await updateBeds24Booking({
-      externalRef: data.externalRef,
-      guestName: update.guestName,
-      phone: update.phone,
-      email: update.email,
-      startDate: update.startDate,
-      endDate: update.endDate,
-      notes: update.notes,
-      status: update.status,
-    });
-  } catch (e) {
-    console.error("[reservations PATCH] beds24 push threw", e);
+      await updateBeds24Booking({
+        externalRef: data.externalRef,
+        guestName: update.guestName,
+        phone: update.phone,
+        email: update.email,
+        startDate: update.startDate,
+        endDate: update.endDate,
+        notes: update.notes,
+        status: update.status,
+      });
+    } catch (e) {
+      console.error("[reservations PATCH] beds24 push threw", e);
+    }
   }
 
   return NextResponse.json(data);

@@ -218,6 +218,9 @@ export async function createBeds24Booking(input: {
     // reference fields help identify the booking when it bounces back via webhook
     referer: "StayPilot",
     apiReference: `staypilot-${input.reservationId}`,
+    // Beds24: API-created bookings don't trigger webhooks by default.
+    // Must explicitly opt in so our webhook handler stays in sync.
+    allowWebhooks: true,
   };
 
   const out = await postBookings([booking]);
@@ -252,7 +255,7 @@ export async function updateBeds24Booking(input: {
   const id = Number(input.externalRef.slice("beds24-".length));
   if (!Number.isFinite(id)) return { ok: false, reason: "invalid Beds24 booking id" };
 
-  const patch: any = { id };
+  const patch: any = { id, allowWebhooks: true };
   if (input.status === "CANCELLED") patch.status = "cancelled";
   else if (input.status === "HOLD") patch.status = "request";
   else if (input.status === "CONFIRMED") patch.status = "confirmed";
@@ -312,26 +315,40 @@ export async function beds24Ping(): Promise<{ ok: boolean; reason?: string }> {
  * Returns our internal source label (title-cased OTA name or "Директна").
  */
 export function detectBookingSource(b: any): string {
-  // ── 1. Structured `channel` enum (most reliable) ──
-  const ch = String(b.channel || "").toLowerCase().trim();
+  // Beds24 v2 GET /bookings response fields used:
+  //   channel          — enum: "booking", "airbnb", "direct", "bookingpage", etc.
+  //   apiSource        — free text: "Airbnb.com", "Booking.com", etc.
+  //   referer          — free text: set when booking was created via API
+  //   refererEditable  — free text: editable version of referer
+  //
+  // IMPORTANT: channel "direct" means "created via API" — this includes
+  // BOTH our website (referer="Direct website booking") and StayPilot
+  // (referer="StayPilot"). We must check referer BEFORE returning
+  // "Директна" for channel=direct, otherwise website bookings get
+  // misclassified.
+
+  const ch  = String(b.channel || "").toLowerCase().trim();
+  const api = String(b.apiSource || "").toLowerCase();
+  const ref = String(b.referer || b.refererEditable || "").toLowerCase();
+
+  // ── 1. OTA channels (highest priority — unambiguous) ──
   if (ch === "booking") return "Booking";
-  if (ch === "airbnb") return "Airbnb";
+  if (ch === "airbnb" || ch === "airbnbical") return "Airbnb";
   if (ch === "expedia") return "Expedia";
-  if (ch === "vrbo") return "VRBO";
+  if (ch === "vrbo" || ch === "vrboical") return "VRBO";
   if (ch === "agoda") return "Agoda";
   if (ch === "hostelworld") return "Hostelworld";
-  if (ch === "direct" || ch === "bookingpage") return "Директна";
+  if (ch === "trip") return "Trip.com";
+  if (ch === "googleads") return "Google Ads";
 
-  // ── 2. Free-text `apiSource` ──
-  const api = String(b.apiSource || "").toLowerCase();
+  // ── 2. OTA patterns in apiSource ──
   if (/booking\.?com/i.test(api)) return "Booking";
   if (/airbnb/i.test(api)) return "Airbnb";
   if (/expedia/i.test(api)) return "Expedia";
   if (/vrbo|homeaway/i.test(api)) return "VRBO";
   if (/agoda/i.test(api)) return "Agoda";
 
-  // ── 3. Free-text `referer` (single 'r' per Beds24 v2 schema) ──
-  const ref = String(b.referer || "").toLowerCase();
+  // ── 3. OTA patterns in referer ──
   if (/booking\.?com/i.test(ref)) return "Booking";
   if (/airbnb/i.test(ref)) return "Airbnb";
   if (/expedia/i.test(ref)) return "Expedia";
@@ -340,9 +357,23 @@ export function detectBookingSource(b: any): string {
   if (/vrbo|homeaway/i.test(ref)) return "VRBO";
   if (/agoda/i.test(ref)) return "Agoda";
   if (/hostelworld/i.test(ref)) return "Hostelworld";
-  if (/staypilot/i.test(ref) || /direct/i.test(ref)) return "Директна";
 
-  // ── 4. If channel was set to anything non-empty, surface it ──
+  // ── 4. Website detection — MUST come before "direct" channel catch-all ──
+  // The website's create-booking.mjs sends referer: "Direct website booking".
+  // Beds24 sets channel="direct" for API-created bookings, so if we checked
+  // channel first, website bookings would be mislabeled as "Директна".
+  if (/website|flora/i.test(ref)) return "Уебсайт";
+
+  // ── 5. StayPilot-created bookings ──
+  if (/staypilot/i.test(ref)) return "Директна";
+
+  // ── 6. channel "direct" / "bookingpage" — generic direct booking ──
+  if (ch === "direct" || ch === "bookingpage") return "Директна";
+
+  // ── 7. Any other referer with "direct" in it ──
+  if (/direct/i.test(ref)) return "Директна";
+
+  // ── 8. If channel was set to anything non-empty, surface it ──
   if (ch) return ch.charAt(0).toUpperCase() + ch.slice(1);
 
   // Default: came through Beds24 but channel unknown
@@ -401,6 +432,7 @@ export async function fetchBeds24Bookings(from: string, to: string): Promise<any
       url.searchParams.set("departureFrom", from);
       url.searchParams.set("arrivalTo", to);
       url.searchParams.set("includeInvoiceItems", "true");
+      url.searchParams.set("includeInfoItems", "true");
       url.searchParams.set("includeGuests", "true");
       const r = await fetch(url.toString(), {
         method: "GET",

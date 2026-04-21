@@ -537,7 +537,10 @@ const ROOM_CODES_BY_LEN = [...ALL_ROOM_CODES].sort((a, b) => b.length - a.length
  * appear, so short commands still work.
  */
 function roomCodeHaystack(transcript: string): string {
-  const lower = transcript.toLowerCase();
+  // Normalise "стария"/"старият" → "стая" (speech recognition confusion)
+  let lower = transcript.toLowerCase()
+    .replace(/(?<!\p{L})стария(?=\s)/gu, "стая")
+    .replace(/(?<!\p{L})старият(?=\s)/gu, "стая");
   // Match the room-code slice after "стая" etc., stopping at a comma,
   // period, or reservation-keyword boundary — not just end-of-string.
   // Note: dots and dashes are PART of room codes (e.g., "41.0.1", "41-2"),
@@ -1018,6 +1021,41 @@ function extractChildren(text: string): number | null {
   return null;
 }
 
+function extractCots(text: string): number | null {
+  const s = text.toLowerCase();
+
+  // "без кошара" / "няма кошара" → 0
+  if (/(?<![\p{L}])(?:без|няма)\s+кошар[аи](?![\p{L}])/u.test(s)) return 0;
+
+  // "N кошари/кошара" — digit form ("2 кошари")
+  const digitCots = s.match(/(?<![\p{L}])(\d{1,2})\s+кошар[аи](?:ки)?(?![\p{L}])/u);
+  if (digitCots) return Math.min(5, parseInt(digitCots[1], 10));
+
+  // "<spelled> кошари" — e.g., "две кошари", "една кошара"
+  const spokenCots = s.match(/(?<![\p{L}])(едн[аo]|две|два|три|четири|пет)\s+кошар[аи](?:ки)?(?![\p{L}])/u);
+  if (spokenCots) {
+    const n = parseNumberLike(spokenCots[1]);
+    if (n != null && n >= 1 && n <= 5) return n;
+  }
+
+  // "с N кошари" — e.g., "с 2 кошари"
+  const withDigit = s.match(/(?<![\p{L}])(?:с|със)\s+(\d{1,2})\s+кошар[аи](?:ки)?(?![\p{L}])/u);
+  if (withDigit) return Math.min(5, parseInt(withDigit[1], 10));
+
+  // "с <spelled> кошари"
+  const withSpoken = s.match(/(?<![\p{L}])(?:с|със)\s+([\p{L}]+)\s+кошар[аи](?:ки)?(?![\p{L}])/u);
+  if (withSpoken) {
+    const n = parseNumberLike(withSpoken[1]);
+    if (n != null && n >= 1 && n <= 5) return n;
+  }
+
+  // "кошара" / "с кошара" / "една кошара" alone → 1
+  if (/(?<![\p{L}])(?:с\s+)?кошар[ак](?:та)?(?![\p{L}])/u.test(s)) return 1;
+  if (/(?<![\p{L}])(?:baby\s+cot|crib)(?![\p{L}])/iu.test(s)) return 1;
+
+  return null;
+}
+
 function extractEmail(text: string): string | null {
   // Standard form after transcript cleanup — webkitSpeech usually
   // renders e-mails as "john at example dot com". Try both shapes.
@@ -1103,7 +1141,8 @@ function extractSpecialRequests(text: string): string | null {
     [/(?:искат?|трябва(?:т)?|нужен|нужно|нуждае)\s+(?:им\s+)?(?:от\s+)?паркинг/u, "паркинг"],
     [/паркомясто/u, "паркинг"],
     [/(?<![\p{L}])паркинг(?![\p{L}])/u, "паркинг"],
-    [/детск[оа]\s+легло|бебешк[оа]\s+легло|кошар[аи]|кошарк[аи]|(?<![А-Яа-яA-Za-z])ДТ(?![А-Яа-яA-Za-z])/iu, "детско легло"],
+    [/детск[оа]\s+легло|бебешк[оа]\s+легло|(?<![А-Яа-яA-Za-z])ДТ(?![А-Яа-яA-Za-z])/iu, "детско легло"],
+    [/кошар[аи]|кошарк[аи]/iu, "кошара"],
     // Bed type preferences
     [/раздел(?:ен|н)?[иея]\s+легл[аи]|отделн[иея]\s+легл[аи]|twin\s+beds?|две\s+легл[аи]|сепарирани\s+легл[аи]/iu, "разделни легла"],
     [/двойно\s+легло|голямо\s+легло|king\s*size|queen\s*size|едно\s+голямо\s+легло|matrimonial/iu, "двойно легло"],
@@ -1182,7 +1221,7 @@ function extractSpecialRequests(text: string): string | null {
     [/(?<![\p{L}])no\s+smoking(?![\p{L}])/iu, "непушач"],
     [/(?<![\p{L}])sea\s+view(?![\p{L}])/iu, "с гледка към морето"],
     [/(?<![\p{L}])extra\s+bed(?![\p{L}])/iu, "допълнително легло"],
-    [/(?<![\p{L}])baby\s+cot|(?<![\p{L}])crib(?![\p{L}])/iu, "детско легло"],
+    [/(?<![\p{L}])baby\s+cot|(?<![\p{L}])crib(?![\p{L}])/iu, "кошара"],
     // ── Connecting / adjacent rooms ──
     [/свързан[иея]\s+ста[ия]|с\s+вътрешна\s+врата/u, "свързани стаи"],
     [/съседн[иея]\s+ста[ия]|една\s+до\s+друга/u, "съседни стаи"],
@@ -1325,6 +1364,7 @@ export type ParsedReservation = {
   phone: string | null;
   guests: number | null;
   children: number | null;
+  cots: number | null;
   notes: string | null;
   email: string | null;
   pricePerNight: number | null;
@@ -1347,6 +1387,10 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     .replace(/[,;]{2,}/g, ",")
     // Whisper sometimes outputs "..." as a pause marker
     .replace(/…/g, " ")
+    // Speech recognition confuses "стая" (room) with "стария" / "старият"
+    // (the old one). Normalise before any parsing so room anchors work.
+    .replace(/(?<!\p{L})стария(?=\s+[\d\p{L}])/gu, "стая")
+    .replace(/(?<!\p{L})старият(?=\s+[\d\p{L}])/gu, "стая")
     // Normalise multiple spaces
     .replace(/\s+/g, " ")
     .trim();
@@ -1544,6 +1588,61 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
     }
   }
 
+  // "N и N <month>" — spoken as "20 и 23 май" (20th and 23rd of May).
+  // Speech recognition often inserts "и" between the two day numbers.
+  // Handle digit, ordinal, and mixed forms.
+  if (!start && !end) {
+    const monthAltAnd = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+    // Digit form: "20 и 23 май"
+    const andDigitRange = s.match(new RegExp(
+      `(?<![\\p{L}\\d])(\\d{1,2})\\s+и\\s+(\\d{1,2})\\s+(${monthAltAnd})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+    ));
+    if (andDigitRange) {
+      const d1 = parseInt(andDigitRange[1], 10);
+      const d2 = parseInt(andDigitRange[2], 10);
+      const mn = MONTHS[andDigitRange[3]];
+      const yr = andDigitRange[4] ? parseInt(andDigitRange[4], 10) : ctx.year;
+      if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2 && mn) {
+        start = toIso(yr, mn, d1);
+        end   = toIso(yr, mn, d2);
+      }
+    }
+    // Ordinal form: "пети и десети май"
+    if (!start && !end) {
+      const ordAltAnd = Object.keys(ORDINALS).sort((a, b) => b.length - a.length).join("|");
+      const andOrdRange = s.match(new RegExp(
+        `(?<![\\p{L}])(${ordAltAnd})\\s+и\\s+(${ordAltAnd})\\s+(${monthAltAnd})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+      ));
+      if (andOrdRange) {
+        const d1 = ORDINALS[andOrdRange[1]];
+        const d2 = ORDINALS[andOrdRange[2]];
+        const mn = MONTHS[andOrdRange[3]];
+        const yr = andOrdRange[4] ? parseInt(andOrdRange[4], 10) : ctx.year;
+        if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2 && mn) {
+          start = toIso(yr, mn, d1);
+          end   = toIso(yr, mn, d2);
+        }
+      }
+    }
+    // Mixed form: digit + ordinal or ordinal + digit, e.g. "20 и десети май"
+    if (!start && !end) {
+      const numOrOrdAltAnd = `\\d{1,2}|${Object.keys({ ...ORDINALS, ...CARDINALS }).filter(k => (ORDINALS[k] ?? CARDINALS[k]) <= 31).sort((a, b) => b.length - a.length).join("|")}`;
+      const andMixedRange = s.match(new RegExp(
+        `(?<![\\p{L}\\d])(${numOrOrdAltAnd})\\s+и\\s+(${numOrOrdAltAnd})\\s+(${monthAltAnd})(?:\\s+(\\d{4}))?(?![\\p{L}])`, "u"
+      ));
+      if (andMixedRange) {
+        const d1 = parseNumberLike(andMixedRange[1]);
+        const d2 = parseNumberLike(andMixedRange[2]);
+        const mn = MONTHS[andMixedRange[3]];
+        const yr = andMixedRange[4] ? parseInt(andMixedRange[4], 10) : ctx.year;
+        if (d1 != null && d2 != null && d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d1 < d2 && mn) {
+          start = toIso(yr, mn, d1);
+          end   = toIso(yr, mn, d2);
+        }
+      }
+    }
+  }
+
   // Two consecutive day-like tokens + month → date range.
   // "пети десети май" or "5 10 май" or "пети десети" (current month).
   // Bulgarian shorthand: first number = start day, second = end day.
@@ -1716,6 +1815,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   const phone = extractPhone(raw);
   const guests = extractGuestCount(raw);
   const children = extractChildren(raw);
+  const cots = extractCots(raw);
   const email = extractEmail(raw);
   const pricePerNight = extractPricePerNight(raw);
   const arrivalTime = extractTime(raw, "arrival");
@@ -1731,7 +1831,7 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   if (specials) noteParts.push(specials);
   const notes = noteParts.length ? noteParts.join("; ") : null;
 
-  return { name, room, start, end, phone, guests, children, notes, email, pricePerNight, arrivalTime, departureTime, source };
+  return { name, room, start, end, phone, guests, children, cots, notes, email, pricePerNight, arrivalTime, departureTime, source };
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -49,6 +49,14 @@ function normaliseWebsitePayload(raw: any): any {
   if (out.guests    == null && raw.adults      != null)         out.guests = raw.adults;
   if (out.email     == null && raw.guestEmail  != null)         out.email = raw.guestEmail;
   if (out.phone     == null && raw.guestPhone  != null)         out.phone = raw.guestPhone;
+  // Flora sometimes sends a range like "15:00–16:00" (em-dash) or "15:00-16:00".
+  // Strict HH:MM regex would reject those — extract the first time, or drop
+  // the field if it's unparseable so Zod doesn't reject the whole booking.
+  if (typeof out.arrivalTime === "string") {
+    const m = out.arrivalTime.match(/(\d{2}:\d{2})/);
+    if (m) out.arrivalTime = m[1];
+    else delete out.arrivalTime;
+  }
   return out;
 }
 

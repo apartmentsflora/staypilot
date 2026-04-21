@@ -196,8 +196,21 @@ export async function GET() {
   }
 
   const durationMs = Date.now() - startMs;
+
+  // Debug: log ALL booking IDs returned by Beds24 so we can compare with our DB
+  const apiBookingIds = bookings.map((b: any) => ({
+    id: b.id,
+    propertyId: b.propertyId,
+    roomId: b.roomId,
+    arrival: b.arrival,
+    departure: b.departure,
+    status: b.status,
+    name: `${b.firstName || ""} ${b.lastName || ""}`.trim(),
+  }));
+
   await logPoll("PROCESSED", {
     total: bookings.length, inserted, updated, cancelled, skipped, errors, durationMs,
+    apiBookingIds,
   });
 
   return NextResponse.json({

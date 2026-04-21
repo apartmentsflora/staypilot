@@ -95,8 +95,14 @@ export async function POST(req: Request) {
   }
   // Handle PING / test webhooks — always return 200 so Beds24 doesn't
   // mark our endpoint as unhealthy and stop sending real webhooks.
-  if (payload?.action === "PING" || payload?.action === "TEST") {
-    return NextResponse.json({ ok: true, action: payload.action, received: true });
+  // Accept a handful of shapes Beds24 uses for test calls.
+  if (
+    payload?.action === "PING" ||
+    payload?.action === "TEST" ||
+    payload?.test === true ||
+    payload?.test === "true"
+  ) {
+    return NextResponse.json({ ok: true, test: true, received: true });
   }
   return handleBookingWebhook(payload, startMs);
 }
@@ -235,7 +241,9 @@ async function handleBookingWebhook(payload: any, startMs: number): Promise<Next
       error: String(e?.message || e),
       stack: String(e?.stack || "").slice(0, 500),
     });
-    return NextResponse.json({ ok: false, error: "apply failed" }, { status: 500 });
+    // Return 200 so Beds24 does not mark the endpoint unhealthy. The error
+    // is captured in SyncEvent above; the user can audit it in Supabase.
+    return NextResponse.json({ ok: false, error: "apply failed" });
   }
 }
 
@@ -290,10 +298,9 @@ async function handleSyncRoom(payload: any, startMs: number): Promise<NextRespon
   } catch (e: any) {
     console.error("[beds24-wh] SYNC_ROOM fetch failed:", e);
     await logSync("ERROR", { action: "SYNC_ROOM", roomCode, error: String(e?.message || e) });
-    return NextResponse.json(
-      { ok: false, action: "SYNC_ROOM", error: "fetch failed" },
-      { status: 502 },
-    );
+    // Return 200 so Beds24 keeps delivering future webhooks. The fetch
+    // failure is already logged to SyncEvent (step='SYNC_ROOM').
+    return NextResponse.json({ ok: false, action: "SYNC_ROOM", error: "fetch failed" });
   }
 
   // ── Filter to bookings for THIS specific room ──
@@ -694,13 +701,23 @@ async function fetchPropertyBookings(
     // Cache the new token (24h default, with safety margin)
     const expiresIn = typeof body.expiresIn === "number" ? body.expiresIn : 82800;
     const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+    // Beds24 v2 rotates the refresh token on every exchange — persisting
+    // the new one keeps the chain alive forever (Problem 0 of the plan).
+    const rotatedRefresh = typeof body.refreshToken === "string" && body.refreshToken.length > 0
+      ? body.refreshToken
+      : null;
     try {
       await supabaseAdmin
         .from("IntegrationCredential")
         .upsert(
           {
             provider: "beds24",
-            values: { ...vals, accessToken: token, accessTokenExpiresAt: expiresAt },
+            values: {
+              ...vals,
+              accessToken: token,
+              accessTokenExpiresAt: expiresAt,
+              ...(rotatedRefresh ? { refreshToken: rotatedRefresh } : {}),
+            },
             updatedAt: new Date().toISOString(),
           },
           { onConflict: "provider" },

@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { reservationId, type, customWaText } = body;
+  const { reservationId, type, customWaText, customHtml, customSubject } = body;
   if (!reservationId || !type || !["welcome", "farewell"].includes(type)) {
     return NextResponse.json({ error: "Missing reservationId or invalid type (welcome|farewell)" }, { status: 400 });
   }
@@ -105,13 +105,13 @@ export async function POST(req: Request) {
         auth: { user: gmailUser, pass: gmailPass },
       });
 
-      const subject = type === "farewell"
+      const subject = customSubject || (type === "farewell"
         ? farewellEmailSubject(td.guestName, lang)
-        : welcomeEmailSubject(td.guestName, lang);
+        : welcomeEmailSubject(td.guestName, lang));
 
-      const html = type === "farewell"
+      const html = customHtml || (type === "farewell"
         ? farewellEmailHtml(td)
-        : welcomeEmailHtml(td);
+        : welcomeEmailHtml(td));
 
       await transporter.sendMail({
         from: `"Apartments Flora" <${gmailUser}>`,

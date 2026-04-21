@@ -67,6 +67,14 @@ interface WelcomeStrings {
   depositRef: (room: string, checkin: string, checkout: string) => string;
   depositNote: string;
   lateCheckinWarning: string;
+  // Self check-in instructions block
+  selfCheckinTitle: string;
+  selfCheckinStep1: string;
+  selfCheckinStep2: string;
+  selfCheckinStep3: string;
+  selfCheckinStep4: string;
+  selfCheckinWifi: string;
+  selfCheckinContact: string;
 }
 
 interface FarewellStrings {
@@ -122,6 +130,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Reservation ${room}, ${ci}-${co}`,
     depositNote: "Please include the reference so the payment can be identified. The payment must be made within 3 business days.",
     lateCheckinWarning: `Check-in after 6:00 PM is conducted via self check-in. Instructions will be sent to the email/phone number you have provided. If you are unable to perform a self check-in, a surcharge of <strong>50% of one night&rsquo;s rate</strong> will apply for the host to personally accommodate you.`,
+    selfCheckinTitle: "Self Check-in Instructions",
+    selfCheckinStep1: "Locate your building entrance using the address provided",
+    selfCheckinStep2: "Enter the building code on the keypad at the entrance door",
+    selfCheckinStep3: "Your room key is in the key box near the entrance. Use code provided below",
+    selfCheckinStep4: "Proceed to your room and settle in. Towels and linens are prepared for you",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "If you need assistance, call us at: <strong>+359 879 559 961</strong>",
   },
   bg: {
     heading: "Вашата резервация е потвърдена",
@@ -151,6 +166,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Резервация ${room}, ${ci}-${co}`,
     depositNote: "Моля задължително посочете причината за превода, за да може плащането да бъде идентифицирано. Плащането трябва да бъде извършено в рамките на 3 дни.",
     lateCheckinWarning: `Настаняване след 18:00 часа се извършва чрез самостоятелно настаняване (self check-in), за което ще получите инструкции на посочения имейл/телефон. При невъзможност за самостоятелно настаняване ще бъде начислена такса от <strong>50% от цената за една нощувка</strong> за физическото присъствие на домакина.`,
+    selfCheckinTitle: "Инструкции за самостоятелно настаняване",
+    selfCheckinStep1: "Намерете входа на сградата по посочения адрес",
+    selfCheckinStep2: "Въведете кода на клавиатурата на входната врата",
+    selfCheckinStep3: "Ключът за стаята се намира в кутията до входа. Използвайте кода по-долу",
+    selfCheckinStep4: "Настанете се в стаята. Кърпи и спално бельо са подготвени за Вас",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "При нужда от помощ, обадете се на: <strong>+359 879 559 961</strong>",
   },
   de: {
     heading: "Ihre Reservierung ist bestätigt",
@@ -180,6 +202,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Reservierung ${room}, ${ci}-${co}`,
     depositNote: "Bitte geben Sie unbedingt den Verwendungszweck an, damit die Zahlung zugeordnet werden kann. Die Zahlung muss innerhalb von 3 Werktagen erfolgen.",
     lateCheckinWarning: `Ein Check-in nach 18:00 Uhr erfolgt per Self-Check-in. Die Anleitung wird an die von Ihnen angegebene E-Mail-Adresse/Telefonnummer gesendet. Falls Sie keinen Self-Check-in durchf&uuml;hren k&ouml;nnen, wird eine Geb&uuml;hr von <strong>50% des &Uuml;bernachtungspreises</strong> f&uuml;r die pers&ouml;nliche Unterbringung durch den Gastgeber erhoben.`,
+    selfCheckinTitle: "Anleitung zum Self-Check-in",
+    selfCheckinStep1: "Finden Sie den Geb&auml;udeeingang anhand der angegebenen Adresse",
+    selfCheckinStep2: "Geben Sie den Code auf der Tastatur an der Eingangst&uuml;r ein",
+    selfCheckinStep3: "Ihr Zimmerschl&uuml;ssel befindet sich in der Schl&uuml;sselbox am Eingang. Verwenden Sie den unten angegebenen Code",
+    selfCheckinStep4: "Gehen Sie zu Ihrem Zimmer. Handt&uuml;cher und Bettw&auml;sche sind f&uuml;r Sie vorbereitet",
+    selfCheckinWifi: "WLAN",
+    selfCheckinContact: "Falls Sie Hilfe ben&ouml;tigen, rufen Sie uns an: <strong>+359 879 559 961</strong>",
   },
   fr: {
     heading: "Votre réservation est confirmée",
@@ -209,6 +238,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Réservation ${room}, ${ci}-${co}`,
     depositNote: "Veuillez indiquer la r&eacute;f&eacute;rence afin que le paiement puisse &ecirc;tre identifi&eacute;. Le paiement doit &ecirc;tre effectu&eacute; dans un d&eacute;lai de 3 jours ouvrables.",
     lateCheckinWarning: `L&rsquo;arriv&eacute;e apr&egrave;s 18h00 s&rsquo;effectue par self check-in. Les instructions seront envoy&eacute;es &agrave; l&rsquo;adresse e-mail/num&eacute;ro de t&eacute;l&eacute;phone que vous avez indiqu&eacute;. En cas d&rsquo;impossibilit&eacute; d&rsquo;effectuer un self check-in, des frais de <strong>50% du tarif d&rsquo;une nuit</strong> seront factur&eacute;s pour l&rsquo;accueil en personne par l&rsquo;h&ocirc;te.`,
+    selfCheckinTitle: "Instructions pour le self check-in",
+    selfCheckinStep1: "Trouvez l&rsquo;entr&eacute;e du b&acirc;timent &agrave; l&rsquo;adresse indiqu&eacute;e",
+    selfCheckinStep2: "Entrez le code sur le clavier de la porte d&rsquo;entr&eacute;e",
+    selfCheckinStep3: "La cl&eacute; de votre chambre se trouve dans la bo&icirc;te &agrave; cl&eacute;s pr&egrave;s de l&rsquo;entr&eacute;e. Utilisez le code ci-dessous",
+    selfCheckinStep4: "Installez-vous dans votre chambre. Serviettes et draps sont pr&eacute;par&eacute;s pour vous",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "Si vous avez besoin d&rsquo;aide, appelez-nous au : <strong>+359 879 559 961</strong>",
   },
   ru: {
     heading: "Ваша бронь подтверждена",
@@ -238,6 +274,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Бронирование ${room}, ${ci}-${co}`,
     depositNote: "Пожалуйста, обязательно укажите назначение платежа, чтобы оплата могла быть идентифицирована. Оплата должна быть произведена в течение 3 рабочих дней.",
     lateCheckinWarning: `Заселение после 18:00 осуществляется путём самостоятельного заселения (self check-in). Инструкции будут отправлены на указанный Вами адрес электронной почты/телефон. В случае невозможности самостоятельного заселения взимается доплата в размере <strong>50% от стоимости одной ночи</strong> за личное присутствие хозяина.`,
+    selfCheckinTitle: "Инструкции по самостоятельному заселению",
+    selfCheckinStep1: "Найдите вход в здание по указанному адресу",
+    selfCheckinStep2: "Введите код на клавиатуре входной двери",
+    selfCheckinStep3: "Ключ от номера находится в ключнице у входа. Используйте код, указанный ниже",
+    selfCheckinStep4: "Расположитесь в номере. Полотенца и постельное бельё подгото��лены для Вас",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "Если Вам нужна помощь, позвоните нам: <strong>+359 879 559 961</strong>",
   },
   uk: {
     heading: "Ваше бронювання підтверджено",
@@ -267,6 +310,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Бронювання ${room}, ${ci}-${co}`,
     depositNote: "Будь ласка, обов'язково вкажіть призначення платежу, щоб оплату можна було ідентифікувати. Оплата має бути здійснена протягом 3 робочих днів.",
     lateCheckinWarning: `Заселення після 18:00 здійснюється шляхом самостійного заселення (self check-in). Інструкції будуть надіслані на вказану Вами електронну адресу/телефон. У разі неможливості самостійного заселення стягується додаткова плата у розмірі <strong>50% від вартості однієї ночі</strong> за особисту присутність господаря.`,
+    selfCheckinTitle: "Інструкції для самостійного заселення",
+    selfCheckinStep1: "Знайдіть вхід до будівлі за вказаною адресою",
+    selfCheckinStep2: "Введіть код на клавіатурі вхідних дверей",
+    selfCheckinStep3: "Ключ від номера знаходиться в ключниці біля входу. Використайте код, вказаний нижче",
+    selfCheckinStep4: "Розташуйтесь у номері. Рушники та постільна білизна підготовлені для Вас",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "Якщо Вам потрібна допомога, зателефонуйте нам: <strong>+359 879 559 961</strong>",
   },
   no: {
     heading: "Din reservasjon er bekreftet",
@@ -296,6 +346,13 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     depositRef: (room, ci, co) => `Reservasjon ${room}, ${ci}-${co}`,
     depositNote: "Vennligst oppgi referansen slik at betalingen kan identifiseres. Betalingen m&aring; gjennomf&oslash;res innen 3 virkedager.",
     lateCheckinWarning: `Innsjekk etter kl. 18:00 gjennomf&oslash;res via selvinnsjekking. Instruksjoner vil bli sendt til e-postadressen/telefonnummeret du har oppgitt. Dersom du ikke kan gjennomf&oslash;re selvinnsjekking, vil det p&aring;l&oslash;pe et gebyr p&aring; <strong>50% av prisen for &eacute;n natt</strong> for at verten personlig skal ta imot deg.`,
+    selfCheckinTitle: "Instruksjoner for selvinnsjekking",
+    selfCheckinStep1: "Finn bygningens inngang p&aring; den oppgitte adressen",
+    selfCheckinStep2: "Tast inn koden p&aring; tastaturet ved inngangsd&oslash;ren",
+    selfCheckinStep3: "Romnøkkelen din er i nøkkelboksen ved inngangen. Bruk koden nedenfor",
+    selfCheckinStep4: "G&aring; til rommet ditt. H&aring;ndklær og sengetøy er klargjort for deg",
+    selfCheckinWifi: "Wi-Fi",
+    selfCheckinContact: "Trenger du hjelp, ring oss p&aring;: <strong>+359 879 559 961</strong>",
   },
 };
 
@@ -659,6 +716,58 @@ export function welcomeEmailHtml(d: TemplateData): string {
           </td></tr>
 
         </table>
+
+      <!-- ══ SELF CHECK-IN INSTRUCTIONS (shown for late arrivals ≥ 18:00) ══ -->
+      ${d.arrivalTime >= "18:00" ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px">
+        <tr><td>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#122943;border-radius:12px;overflow:hidden">
+            <tr><td style="padding:28px 28px 12px;text-align:center">
+              <p style="margin:0 0 4px;font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#C9A84C;font-family:Georgia,serif">&#9670; &#9670; &#9670;</p>
+              <p style="margin:0;font-size:18px;font-weight:700;color:#fffdf8;font-family:Georgia,serif">${t.selfCheckinTitle}</p>
+            </td></tr>
+            <tr><td style="padding:0 28px">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr><td style="padding:12px 0;border-bottom:1px solid rgba(201,168,76,0.15)">
+                  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                    <td style="width:32px;vertical-align:top"><div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;color:#122943;font-size:14px;font-weight:700;text-align:center;line-height:28px;font-family:Georgia,serif">1</div></td>
+                    <td style="padding:4px 0 0 12px;font-size:14px;color:rgba(255,253,248,0.85);font-family:Georgia,serif;line-height:1.6">${t.selfCheckinStep1}</td>
+                  </tr></table>
+                </td></tr>
+                <tr><td style="padding:12px 0;border-bottom:1px solid rgba(201,168,76,0.15)">
+                  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                    <td style="width:32px;vertical-align:top"><div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;color:#122943;font-size:14px;font-weight:700;text-align:center;line-height:28px;font-family:Georgia,serif">2</div></td>
+                    <td style="padding:4px 0 0 12px;font-size:14px;color:rgba(255,253,248,0.85);font-family:Georgia,serif;line-height:1.6">${t.selfCheckinStep2}<br/><span style="font-size:20px;font-weight:700;color:#C9A84C;letter-spacing:2px;font-family:monospace">____</span></td>
+                  </tr></table>
+                </td></tr>
+                <tr><td style="padding:12px 0;border-bottom:1px solid rgba(201,168,76,0.15)">
+                  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                    <td style="width:32px;vertical-align:top"><div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;color:#122943;font-size:14px;font-weight:700;text-align:center;line-height:28px;font-family:Georgia,serif">3</div></td>
+                    <td style="padding:4px 0 0 12px;font-size:14px;color:rgba(255,253,248,0.85);font-family:Georgia,serif;line-height:1.6">${t.selfCheckinStep3}<br/><span style="font-size:20px;font-weight:700;color:#C9A84C;letter-spacing:2px;font-family:monospace">____</span></td>
+                  </tr></table>
+                </td></tr>
+                <tr><td style="padding:12px 0;border-bottom:1px solid rgba(201,168,76,0.15)">
+                  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                    <td style="width:32px;vertical-align:top"><div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;color:#122943;font-size:14px;font-weight:700;text-align:center;line-height:28px;font-family:Georgia,serif">4</div></td>
+                    <td style="padding:4px 0 0 12px;font-size:14px;color:rgba(255,253,248,0.85);font-family:Georgia,serif;line-height:1.6">${t.selfCheckinStep4}</td>
+                  </tr></table>
+                </td></tr>
+              </table>
+            </td></tr>
+            <tr><td style="padding:16px 28px">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:rgba(201,168,76,0.12);border-radius:8px">
+                <tr><td style="padding:12px 16px">
+                  <p style="margin:0 0 4px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#C9A84C;font-family:Georgia,serif">${t.selfCheckinWifi}</p>
+                  <p style="margin:0;font-size:15px;font-weight:700;color:#fffdf8;font-family:monospace,Georgia,serif;letter-spacing:0.5px">Flora_Guest / ____</p>
+                </td></tr>
+              </table>
+            </td></tr>
+            <tr><td style="padding:0 28px 24px;text-align:center">
+              <p style="margin:0;font-size:13px;line-height:1.7;color:rgba(255,253,248,0.65);font-family:Georgia,serif">${t.selfCheckinContact}</p>
+            </td></tr>
+          </table>
+        </td></tr>
+      </table>` : ``}
 
       </td></tr>
     </table>

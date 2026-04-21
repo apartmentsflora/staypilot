@@ -85,9 +85,13 @@ export default function CalendarPage() {
   const [cancelConfirm, setCancelConfirm] = useState<any>(null);
   const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
   const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|null>(null);
+  const [justSaved, setJustSaved] = useState(false); // flash "saved" banner after creation
   const [msgSending, setMsgSending] = useState<"welcome"|"farewell"|null>(null);
   const [msgPreview, setMsgPreview] = useState<{type:"welcome"|"farewell", resId:string, emailHtml:string, emailSubject:string, waText:string, phone:string, email:string}|null>(null);
   const [editableWaText, setEditableWaText] = useState("");
+  const [editableEmailHtml, setEditableEmailHtml] = useState("");
+  const [editableEmailSubject, setEditableEmailSubject] = useState("");
+  const [emailEditMode, setEmailEditMode] = useState(false);
   const [previewTab, setPreviewTab] = useState<"email"|"whatsapp">("email");
   const lastFetchRef = useRef<string>("");
   const [syncing, setSyncing] = useState(false);
@@ -163,6 +167,8 @@ export default function CalendarPage() {
         await load();
       }
     } catch { /* non-fatal */ }
+    // Auto-send emails (welcome on creation day, farewell on checkout day after 11AM)
+    try { await fetch("/api/messages/auto-send"); } catch { /* non-fatal */ }
     setSyncing(false);
     syncingRef.current = false;
   }, [load]);
@@ -652,9 +658,20 @@ export default function CalendarPage() {
       });
     }
     if (res.ok) {
-      setModal(false); setEditingRes(null); setVoiceParsed(null);
-      setForm({...EMPTY_FORM});
+      const saved = await res.json();
+      setVoiceParsed(null);
       await load();
+      if (editingRes) {
+        // Was editing — close modal
+        setModal(false); setEditingRes(null);
+        setForm({...EMPTY_FORM});
+        setJustSaved(false);
+      } else {
+        // Was creating — switch to editing mode so message buttons appear
+        setEditingRes(saved);
+        setJustSaved(true);
+        setTimeout(() => setJustSaved(false), 8000);
+      }
     } else {
       const e = await res.json();
       alert(e.error || "Грешка при запис");
@@ -703,6 +720,9 @@ export default function CalendarPage() {
       }
       setMsgPreview({ type, resId, emailHtml: data.emailHtml, emailSubject: data.emailSubject, waText: data.waText, phone: data.phone, email: data.email });
       setEditableWaText(data.waText);
+      setEditableEmailHtml(data.emailHtml);
+      setEditableEmailSubject(data.emailSubject);
+      setEmailEditMode(false);
       setPreviewTab("email");
     } catch (e: any) {
       alert("Грешка: " + (e.message || "Неуспешно зареждане"));
@@ -718,7 +738,12 @@ export default function CalendarPage() {
       const resp = await fetch("/api/messages/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reservationId: msgPreview.resId, type: msgPreview.type, customWaText: editableWaText }),
+        body: JSON.stringify({
+          reservationId: msgPreview.resId,
+          type: msgPreview.type,
+          customWaText: editableWaText,
+          ...(emailEditMode ? { customHtml: editableEmailHtml, customSubject: editableEmailSubject } : {}),
+        }),
       });
       const data = await resp.json();
       if (!resp.ok) {
@@ -1104,6 +1129,13 @@ export default function CalendarPage() {
                   )}
                   <button onClick={() => { setModal(false); setEditingRes(null); setVoiceParsed(null); }} style={{ background:"#f5f3ef", color:"#666", border:"1px solid #dedad4", borderRadius:"8px", padding:"9px 14px", fontSize:"13px", cursor:"pointer" }}>Затвори</button>
                 </div>
+                {/* ── "Just saved" banner after creating ── */}
+                {justSaved && editingRes && (
+                  <div style={{ marginTop:"9px", background:"#f0fdf4", border:"1px solid #86efac", borderRadius:"8px", padding:"10px 13px", display:"flex", alignItems:"center", gap:"8px" }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    <span style={{ fontSize:"13px", fontWeight:"700", color:"#15803d" }}>Резервацията е запазена! Можете да изпратите съобщение на госта.</span>
+                  </div>
+                )}
                 {/* ── Message buttons (only when editing existing reservation) ── */}
                 {editingRes && editingRes.status !== "CANCELLED" && (
                   <div style={{ marginTop:"11px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:"8px", padding:"10px 13px" }}>
@@ -1323,15 +1355,35 @@ export default function CalendarPage() {
             <div style={{ flex:1, overflow:"auto" }}>
               {previewTab === "email" ? (
                 <div style={{ padding:"0" }}>
-                  <div style={{ padding:"12px 16px", fontSize:"12px", color:"#6b7280", background:"#f9f8f5", borderBottom:"1px solid #e5e2da" }}>
-                    <strong>Тема:</strong> {msgPreview.emailSubject}
+                  <div style={{ padding:"12px 16px", fontSize:"12px", color:"#6b7280", background:"#f9f8f5", borderBottom:"1px solid #e5e2da", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px" }}>
+                    {emailEditMode ? (
+                      <div style={{ flex:1 }}>
+                        <label style={{ fontSize:"11px", fontWeight:"600", color:"#6b7280" }}>Тема:</label>
+                        <input value={editableEmailSubject} onChange={e => setEditableEmailSubject(e.target.value)}
+                          style={{ width:"100%", padding:"6px 8px", fontSize:"12px", border:"1px solid #d1d5db", borderRadius:"6px", marginTop:"3px" }} />
+                      </div>
+                    ) : (
+                      <div><strong>Тема:</strong> {editableEmailSubject}</div>
+                    )}
+                    <button onClick={() => setEmailEditMode(!emailEditMode)}
+                      style={{ background: emailEditMode ? "#122943" : "#f3f4f6", color: emailEditMode ? "#C9A84C" : "#6b7280", border:"1px solid #d1d5db", borderRadius:"6px", padding:"5px 10px", fontSize:"11px", fontWeight:"600", cursor:"pointer", whiteSpace:"nowrap" }}>
+                      {emailEditMode ? "Преглед" : "Редактирай"}
+                    </button>
                   </div>
-                  <iframe
-                    srcDoc={msgPreview.emailHtml}
-                    style={{ width:"100%", height:"520px", border:"none" }}
-                    sandbox="allow-same-origin"
-                    title="Email preview"
-                  />
+                  {emailEditMode ? (
+                    <textarea
+                      value={editableEmailHtml}
+                      onChange={e => setEditableEmailHtml(e.target.value)}
+                      style={{ width:"100%", height:"520px", padding:"12px", fontSize:"13px", fontFamily:"monospace", border:"none", borderTop:"1px solid #e5e2da", resize:"none", color:"#122943", background:"#fffdf8" }}
+                    />
+                  ) : (
+                    <iframe
+                      srcDoc={editableEmailHtml}
+                      style={{ width:"100%", height:"520px", border:"none" }}
+                      sandbox="allow-same-origin"
+                      title="Email preview"
+                    />
+                  )}
                 </div>
               ) : (
                 <div style={{ padding:"16px" }}>

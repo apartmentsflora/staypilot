@@ -122,14 +122,25 @@ async function getAccessToken(): Promise<string | null> {
       });
       return null;
     }
-    const body = (await r.json()) as { token?: string; expiresIn?: number };
+    const body = (await r.json()) as { token?: string; expiresIn?: number; refreshToken?: string };
     if (!body.token) {
       await logSync("ERROR", { step: "token-exchange", body });
       return null;
     }
     const expiresIn = typeof body.expiresIn === "number" ? body.expiresIn : 82800; // ~23h
     const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-    await saveCred({ accessToken: body.token, accessTokenExpiresAt: expiresAt });
+    // Beds24 v2 rotates the refresh token on every exchange. Persisting the
+    // new one is what makes the chain self-healing forever — without this,
+    // the original refresh token eventually gets invalidated and every
+    // Beds24 call dies silently (Problem 0 of the plan).
+    const rotatedRefresh = typeof body.refreshToken === "string" && body.refreshToken.length > 0
+      ? body.refreshToken
+      : null;
+    await saveCred({
+      accessToken: body.token,
+      accessTokenExpiresAt: expiresAt,
+      ...(rotatedRefresh ? { refreshToken: rotatedRefresh } : {}),
+    });
     return body.token;
   } catch (e: any) {
     await logSync("ERROR", { step: "token-exchange", error: String(e?.message || e) });
@@ -383,21 +394,41 @@ export function detectBookingSource(b: any): string {
 /**
  * Extract total price from a Beds24 v2 booking object.
  *
- * Beds24 v2 schema fields used:
- *  - `price`  — total booking price (number, max 99999999.99)
- *  - `invoiceItems` — line-item breakdown (only present when
- *    fetched with `includeInvoiceItems=true`)
+ * Beds24 v2 schema fields (from apiV2.yaml):
+ *  - `price`  — top-level booking price (int32)
+ *  - `invoiceItems` — line-item breakdown (only with includeInvoiceItems=true)
+ *      Each item has: type ("charge"|"payment"), amount (unit), qty, lineTotal,
+ *      subType (1=room price, 101=channel manager total, 200+=payments)
  *
  * Returns the total price as a number, or null if unavailable.
  */
 export function extractBookingPrice(b: any): number | null {
-  // Direct price field (most reliable — always present in Beds24 v2)
+  // 1. Direct price field (most reliable — always present in Beds24 v2)
   if (b.price != null && Number(b.price) > 0) return Number(b.price);
-  // Fallback: sum invoice items if present
-  if (Array.isArray(b.invoiceItems)) {
-    const sum = b.invoiceItems.reduce((acc: number, item: any) => acc + (Number(item.amount) || 0), 0);
-    if (sum > 0) return sum;
+
+  // 2. Sum invoice items — CHARGE items only (skip payments to avoid double-count)
+  //    Use lineTotal (= qty × amount) when available, fall back to amount × qty.
+  if (Array.isArray(b.invoiceItems) && b.invoiceItems.length > 0) {
+    let chargeSum = 0;
+    for (const item of b.invoiceItems) {
+      // Skip payment-type items (type "payment" or subType >= 200)
+      const itype = String(item.type || "").toLowerCase();
+      if (itype === "payment") continue;
+      const subType = Number(item.subType) || 0;
+      if (subType >= 200) continue;
+
+      const lt = Number(item.lineTotal);
+      if (lt && lt > 0) {
+        chargeSum += lt;
+      } else {
+        const amt = Number(item.amount) || 0;
+        const qty = Number(item.qty) || 1;
+        if (amt > 0) chargeSum += amt * qty;
+      }
+    }
+    if (chargeSum > 0) return chargeSum;
   }
+
   return null;
 }
 

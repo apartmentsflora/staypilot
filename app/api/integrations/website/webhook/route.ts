@@ -28,14 +28,36 @@ const WebsiteInput = z.object({
   pricePerNight: z.union([z.string(), z.number()]).optional(),
   arrivalTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   notes: z.string().trim().max(2000).optional().nullable(),
+  // When the upstream client already pushed to Beds24, it can pass the
+  // canonical Beds24 booking id so we store externalRef="beds24-<id>"
+  // from the start — then Beds24's inbound webhook updates the same row
+  // instead of creating a duplicate.
+  beds24BookingId: z.union([z.string(), z.number()]).optional(),
 }).refine(
   (d) => d.roomCode || d.beds24RoomId,
   { message: "Either roomCode or beds24RoomId is required" }
 );
 
+// Accept both the new StayPilot-native field names and the legacy Flora
+// names (checkin/checkout/adults/guestEmail/guestPhone) so either side can
+// be redeployed independently without breaking the pipe.
+function normaliseWebsitePayload(raw: any): any {
+  if (!raw || typeof raw !== "object") return raw;
+  const out: any = { ...raw };
+  if (out.startDate == null && typeof raw.checkin === "string") out.startDate = raw.checkin;
+  if (out.endDate   == null && typeof raw.checkout === "string") out.endDate = raw.checkout;
+  if (out.guests    == null && raw.adults      != null)         out.guests = raw.adults;
+  if (out.email     == null && raw.guestEmail  != null)         out.email = raw.guestEmail;
+  if (out.phone     == null && raw.guestPhone  != null)         out.phone = raw.guestPhone;
+  return out;
+}
+
 export async function POST(req: Request) {
-  // Require API key if configured
-  const apiKey = req.headers.get("x-staypilot-key");
+  // Require API key if configured. Accept both header names; Flora
+  // may send x-api-key (older clients) or x-staypilot-key (current).
+  const apiKey =
+    req.headers.get("x-staypilot-key") ??
+    req.headers.get("x-api-key");
   const { data: cred } = await supabaseAdmin
     .from("IntegrationCredential").select("values").eq("provider", "website").maybeSingle();
   const expectedKey = (cred?.values as any)?.apiKey;
@@ -43,10 +65,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const payload = await req.json().catch(() => ({} as any));
+  const rawPayload = await req.json().catch(() => ({} as any));
+  const payload = normaliseWebsitePayload(rawPayload);
   try {
     await supabaseAdmin.from("SyncEvent").insert({
-      provider: "website", direction: "INBOUND_WEBHOOK", status: "RECEIVED", payload,
+      provider: "website", direction: "INBOUND_WEBHOOK", status: "RECEIVED", payload: rawPayload,
     });
   } catch (e) { console.error("[website webhook] log received failed", e); }
 
@@ -100,7 +123,19 @@ export async function POST(req: Request) {
   const endIso = end.toISOString();
   const detailDates = `${startIso.slice(0, 10)} – ${endIso.slice(0, 10)}`;
 
-  const { data, error } = await supabaseAdmin.from("Reservation").insert({
+  // If the caller already pushed to Beds24 (Flora's create-booking does
+  // this) use that id as externalRef so Beds24's inbound webhook arriving
+  // ~1 min later updates THIS row instead of inserting a duplicate.
+  const incomingBeds24Id = parsed.data.beds24BookingId != null
+    ? String(parsed.data.beds24BookingId).trim()
+    : "";
+  const externalRef = incomingBeds24Id
+    ? `beds24-${incomingBeds24Id}`
+    : `website-${Date.now()}`;
+
+  // Upsert so repeat deliveries of the same website webhook don't 500 on
+  // the unique-externalRef constraint.
+  const { data, error } = await supabaseAdmin.from("Reservation").upsert({
     guestName,
     phone: phone || "",
     email: email || null,
@@ -112,14 +147,14 @@ export async function POST(req: Request) {
     notes: notes || null,
     status: "CONFIRMED",
     color: getRoomColor(roomCode),
-    externalRef: `website-${Date.now()}`,
+    externalRef,
     guests: guestCount,
     children: childrenCount,
     cots: cotsCount,
     pricePerNight,
     arrivalTime,
     departTime: "11:00",
-  }).select().single();
+  }, { onConflict: "externalRef" }).select().single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
@@ -161,27 +196,30 @@ export async function POST(req: Request) {
   // ── Outbound Beds24 push ──────────────────────────────────────────────
   // A website booking must close the dates across every OTA managed by
   // Beds24. Best-effort; failures are logged inside the client and never
-  // block the website response.
-  try {
-    const push = await createBeds24Booking({
-      reservationId: data.id,
-      roomCode,
-      guestName,
-      phone: phone || "",
-      email: email || null,
-      startDate: startIso,
-      endDate: endIso,
-      notes: notes || null,
-      externalRef: null,
-    });
-    if (push.ok && push.bookingId) {
-      await supabaseAdmin
-        .from("Reservation")
-        .update({ externalRef: `beds24-${push.bookingId}` })
-        .eq("id", data.id);
+  // block the website response. SKIP this if the upstream client (Flora)
+  // already pushed to Beds24 and gave us the canonical id.
+  if (!incomingBeds24Id) {
+    try {
+      const push = await createBeds24Booking({
+        reservationId: data.id,
+        roomCode,
+        guestName,
+        phone: phone || "",
+        email: email || null,
+        startDate: startIso,
+        endDate: endIso,
+        notes: notes || null,
+        externalRef: null,
+      });
+      if (push.ok && push.bookingId) {
+        await supabaseAdmin
+          .from("Reservation")
+          .update({ externalRef: `beds24-${push.bookingId}` })
+          .eq("id", data.id);
+      }
+    } catch (e) {
+      console.error("[website webhook] beds24 push threw", e);
     }
-  } catch (e) {
-    console.error("[website webhook] beds24 push threw", e);
   }
 
   return NextResponse.json({ ok: true, reservationId: data.id }, { status: 201 });

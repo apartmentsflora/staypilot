@@ -462,6 +462,15 @@ export async function fetchBeds24Bookings(from: string, to: string): Promise<any
       // This catches guests who arrived before `from` but depart after it.
       url.searchParams.set("departureFrom", from);
       url.searchParams.set("arrivalTo", to);
+      // Beds24 v2 /bookings excludes cancelled+black by default. We must
+      // explicitly request them (as repeated status params) so the poll
+      // can sync cancellations back to StayPilot. Without this, cancelled
+      // Beds24 bookings remain CONFIRMED in StayPilot forever.
+      url.searchParams.append("status", "confirmed");
+      url.searchParams.append("status", "new");
+      url.searchParams.append("status", "request");
+      url.searchParams.append("status", "cancelled");
+      url.searchParams.append("status", "black");
       url.searchParams.set("includeInvoiceItems", "true");
       url.searchParams.set("includeInfoItems", "true");
       url.searchParams.set("includeGuests", "true");

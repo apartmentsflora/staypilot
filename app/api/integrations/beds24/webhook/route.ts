@@ -736,6 +736,13 @@ async function fetchPropertyBookings(
   url.searchParams.set("propertyId", String(propertyId));
   url.searchParams.set("departureFrom", from);    // catches guests still in-house
   url.searchParams.set("arrivalTo", to);           // caps the future window
+  // Include every booking status. Default excludes cancelled+black, which
+  // means a cancellation on the Beds24 side would never propagate here.
+  url.searchParams.append("status", "confirmed");
+  url.searchParams.append("status", "new");
+  url.searchParams.append("status", "request");
+  url.searchParams.append("status", "cancelled");
+  url.searchParams.append("status", "black");
   url.searchParams.set("includeInvoiceItems", "true");
   url.searchParams.set("includeInfoItems", "true");
   url.searchParams.set("includeGuests", "true");

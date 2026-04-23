@@ -63,7 +63,7 @@ function resStyle(r: { id: string; source: string }) {
   return { bg, bd, tx };
 }
 
-const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", cots:"0", arrivalTime:"14:00", departTime:"11:00" };
+const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", cots:"0", arrivalTime:"14:00", departTime:"11:00", caparoReceived:false, caparoAmount:"" };
 
 // ── main component ────────────────────────────────────────────────────────────
 export default function CalendarPage() {
@@ -72,6 +72,9 @@ export default function CalendarPage() {
   const [mo, setMo] = useState(now.getMonth());
   const [sel, setSel] = useState(toDS(now));
   const [tlAnchor, setTlAnchor] = useState(new Date(now.getFullYear(), now.getMonth(), 1));
+  // v1.2 — User-picked range length for the horizontal room timeline.
+  // Default 9 days (matches the legacy hardcoded window).
+  const [tlDaysCount, setTlDaysCount] = useState<number>(9);
   const [rooms, setRooms] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
   const [filters, setFilters] = useState({ bk:true, b2:true, ph:true, dr:true, web:true, ab:true });
@@ -84,7 +87,7 @@ export default function CalendarPage() {
   const recogRef = useRef<any>(null);
   const [cancelConfirm, setCancelConfirm] = useState<any>(null);
   const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
-  const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|null>(null);
+  const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|"arr"|"caparo"|null>(null);
   const [justSaved, setJustSaved] = useState(false); // flash "saved" banner after creation
   const [msgSending, setMsgSending] = useState<"welcome"|"farewell"|null>(null);
   const [msgPreview, setMsgPreview] = useState<{type:"welcome"|"farewell", resId:string, emailHtml:string, emailSubject:string, waText:string, phone:string, email:string}|null>(null);
@@ -169,6 +172,9 @@ export default function CalendarPage() {
     } catch { /* non-fatal */ }
     // Auto-send emails (welcome on creation day, farewell on checkout day after 11AM)
     try { await fetch("/api/messages/auto-send"); } catch { /* non-fatal */ }
+    // v1.2 — Caparo reminders (2-day no-caparo alerts). Idempotent: the
+    // server only reminds reservations it hasn't already reminded.
+    try { await fetch("/api/caparo/check-reminders"); } catch { /* non-fatal */ }
     setSyncing(false);
     syncingRef.current = false;
   }, [load]);
@@ -209,12 +215,14 @@ export default function CalendarPage() {
       const existing = await reg.pushManager.getSubscription();
 
       if (existing) {
-        // Unsubscribe
+        // Unsubscribe from the browser's PushManager (stops OS-level pushes
+        // for this device immediately) AND wipe EVERY server-side record so
+        // no lingering endpoint on another browser / device keeps firing.
         await existing.unsubscribe();
         await fetch("/api/push/subscribe", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ endpoint: existing.endpoint }),
+          body: JSON.stringify({ all: true }),
         });
         setPushState("unsubscribed");
       } else {
@@ -259,15 +267,31 @@ export default function CalendarPage() {
   const dismissedAlertIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    // v1.2 — FIX for "Push OFF button doesn't work":
+    //   Previously this poll fired `new Notification()` every 10s regardless
+    //   of the push toggle. That call is a separate browser API from the
+    //   Service-Worker PushManager, so unsubscribing didn't silence it.
+    //   Now:
+    //     (a) skip the poll entirely when autoSync is off (no server load),
+    //     (b) even when polling, only fire the system notification when
+    //         pushState === "subscribed".
+    //   The in-page ALERT banner still renders so staff see urgent items
+    //   without being pinged at the OS level.
+    if (!autoSync) return;
     const poll = async () => {
       try {
         const res = await fetch("/api/notifications");
         if (!res.ok) return;
         const all: any[] = await res.json();
         const alerts = all.filter((n: any) => n.type === "ALERT");
-        // Show undismissed alerts in the banner
+        // Show undismissed alerts in the banner (always, regardless of push toggle).
         setUrgentAlerts(alerts.filter((a: any) => !dismissedAlertIdsRef.current.has(a.id)));
-        // Fire browser push for any we haven't seen yet
+        // Fire browser system notification ONLY if the user has Push ON.
+        if (pushState !== "subscribed") {
+          // Still mark as "seen" so a later re-enable doesn't back-fill old alerts.
+          for (const a of alerts) seenAlertIdsRef.current.add(a.id);
+          return;
+        }
         for (const a of alerts) {
           if (seenAlertIdsRef.current.has(a.id)) continue;
           seenAlertIdsRef.current.add(a.id);
@@ -285,7 +309,7 @@ export default function CalendarPage() {
     poll(); // immediate
     const iv = setInterval(poll, 10_000);
     return () => clearInterval(iv);
-  }, []);
+  }, [autoSync, pushState]);
 
   const dismissAlert = useCallback((id: string) => {
     dismissedAlertIdsRef.current.add(id);
@@ -300,6 +324,21 @@ export default function CalendarPage() {
       window.history.replaceState({}, "", "/dashboard/calendar");
     }
   }, []);
+
+  // v1.2 — Open a reservation directly from the sidebar guest search.
+  // Waits until `reservations` is loaded so we can resolve the id to an
+  // actual row and hydrate the edit modal.
+  useEffect(() => {
+    if (!reservations || !reservations.length) return;
+    const params = new URLSearchParams(window.location.search);
+    const openId = params.get("open");
+    if (!openId) return;
+    const res = reservations.find(r => r.id === openId);
+    if (res) {
+      openEditRes(res);
+      window.history.replaceState({}, "", "/dashboard/calendar");
+    }
+  }, [reservations]);
 
   // Preload form when modal opens
   useEffect(() => {
@@ -342,6 +381,8 @@ export default function CalendarPage() {
         cots: String(editingRes.cots || 0),
         arrivalTime: editingRes.arrivalTime || "14:00",
         departTime: editingRes.departTime || "11:00",
+        caparoReceived: editingRes.caparoReceived === true,
+        caparoAmount: editingRes.caparoAmount != null ? String(editingRes.caparoAmount) : "",
       });
     }
   }, [editingRes]);
@@ -360,6 +401,9 @@ export default function CalendarPage() {
 
   const activeOn  = useCallback((ds: string) => visRes.filter(r => inRange(ds, r)), [visRes]);
   const checkouts = useCallback((ds: string) => visRes.filter(r => r.endDate.slice(0,10) === ds), [visRes]);
+  // v1.2 — Today's ARRIVALS: reservations whose startDate matches `ds`.
+  // Distinct from `activeOn(ds)` which also includes ongoing stays.
+  const arrivals  = useCallback((ds: string) => visRes.filter(r => r.startDate.slice(0,10) === ds), [visRes]);
 
   // ── Available rooms for selected dates (filter booked ones) ───────────────
   const availableRooms = useMemo(() => {
@@ -387,7 +431,7 @@ export default function CalendarPage() {
   }, [yr, mo]);
 
   // ── timeline ──────────────────────────────────────────────────────────────
-  const tlDays = useMemo(() => Array.from({length:9}, (_,i) => addD(tlAnchor, i)), [tlAnchor]);
+  const tlDays = useMemo(() => Array.from({length: Math.max(1, Math.min(60, tlDaysCount))}, (_,i) => addD(tlAnchor, i)), [tlAnchor, tlDaysCount]);
 
   // ── voice ─────────────────────────────────────────────────────────────────
   const lastTranscriptRef = useRef("");
@@ -641,7 +685,17 @@ export default function CalendarPage() {
   // ── save reservation ──────────────────────────────────────────────────────
   async function saveRes() {
     if (!form.guestName.trim() || !form.roomCode || !form.startDate || !form.endDate) return;
-    const payload = { ...form, guests: Number(form.guests)||1, children: Number(form.children)||0, cots: Number(form.cots)||0, pricePerNight: Number(form.pricePerNight)||0 };
+    const payload = {
+      ...form,
+      guests: Number(form.guests)||1,
+      children: Number(form.children)||0,
+      cots: Number(form.cots)||0,
+      pricePerNight: Number(form.pricePerNight)||0,
+      // v1.2 — Caparo: ensure boolean + numeric coercion before send.
+      caparoReceived: form.caparoReceived === true,
+      caparoAmount: form.caparoAmount !== "" && form.caparoAmount != null
+        ? Number(form.caparoAmount) : null,
+    };
 
     let res;
     if (editingRes) {
@@ -775,9 +829,11 @@ export default function CalendarPage() {
 
   const activeToday = activeOn(sel);
   const coToday = checkouts(sel);
+  const arrivalsToday = arrivals(sel);
   const todayStr = toDS(now);
   const activeTodayReal = activeOn(todayStr);
   const coTodayReal = checkouts(todayStr);
+  const arrivalsTodayReal = arrivals(todayStr);
 
   // ── CSS for mobile ────────────────────────────────────────────────────────
   const mobileCSS = `
@@ -799,7 +855,9 @@ export default function CalendarPage() {
       stats={{ active: activeTodayReal.length, occ: Math.round(activeTodayReal.length/18*100), rev: 0, month: mo, selFmt: fmtS(sel) }}
       onNewRes={() => openNewRes()}
       onTodayRes={() => setTodayFullScreen("res")}
+      onTodayArrivals={() => setTodayFullScreen("arr")}
       onTodayCo={() => setTodayFullScreen("co")}
+      onPendingCaparo={() => setTodayFullScreen("caparo")}
       onVoice={() => setVoiceOpen(true)}
     >
       <style dangerouslySetInnerHTML={{__html: mobileCSS}} />
@@ -970,9 +1028,35 @@ export default function CalendarPage() {
 
           {/* TIMELINE */}
           <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", overflow:"hidden", marginBottom:"14px" }}>
-            <div style={{ padding:"11px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", borderBottom:"1px solid #eee", background:"#faf9f7" }}>
+            <div style={{ padding:"11px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", borderBottom:"1px solid #eee", background:"#faf9f7", flexWrap:"wrap", gap:"8px" }}>
               <span style={{ fontSize:"13px", fontWeight:"700" }}>Стаи · хоризонтален изглед</span>
-              <div style={{ display:"flex", gap:"6px" }}>
+              {/* v1.2 — Date-range jump tool: pick any FROM date and a number
+                  of days to show (1–60). Overrides the default 9-day window
+                  and the ± 3-day step pagination. */}
+              <div style={{ display:"flex", gap:"6px", alignItems:"center", flexWrap:"wrap" }}>
+                <label style={{ fontSize:"10px", fontWeight:"600", color:"#888", textTransform:"uppercase", letterSpacing:".03em" }}>
+                  От&nbsp;
+                  <input type="date" value={toDS(tlAnchor)}
+                    onChange={e => { const v = e.target.value; if (v) setTlAnchor(new Date(v + "T12:00:00")); }}
+                    style={{ height:"26px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 7px", fontSize:"11px", background:"#fff", color:"#111" }} />
+                </label>
+                <label style={{ fontSize:"10px", fontWeight:"600", color:"#888", textTransform:"uppercase", letterSpacing:".03em" }}>
+                  До&nbsp;
+                  <input type="date" value={toDS(addD(tlAnchor, Math.max(0, tlDaysCount - 1)))}
+                    onChange={e => {
+                      const v = e.target.value;
+                      if (!v) return;
+                      const end = new Date(v + "T12:00:00");
+                      const diff = Math.ceil((end.getTime() - tlAnchor.getTime()) / 86400000) + 1;
+                      if (diff >= 1 && diff <= 60) setTlDaysCount(diff);
+                      else if (diff < 1) { setTlAnchor(end); setTlDaysCount(1); }
+                    }}
+                    style={{ height:"26px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 7px", fontSize:"11px", background:"#fff", color:"#111" }} />
+                </label>
+                <select value={tlDaysCount} onChange={e => setTlDaysCount(parseInt(e.target.value, 10))}
+                  style={{ height:"26px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 7px", fontSize:"11px", background:"#fff", color:"#111" }}>
+                  {[7, 9, 14, 21, 30].map(n => <option key={n} value={n}>{n} дни</option>)}
+                </select>
                 <button onClick={() => setTlAnchor(a => addD(a,-3))} style={{ border:"1px solid #dedad4", borderRadius:"6px", padding:"4px 11px", fontSize:"11px", background:"#fff", cursor:"pointer" }}>← Назад 3</button>
                 <button onClick={() => setTlAnchor(a => addD(a,3))} style={{ border:"1px solid #dedad4", borderRadius:"6px", padding:"4px 11px", fontSize:"11px", background:"#fff", cursor:"pointer" }}>Напред 3 →</button>
               </div>
@@ -1111,6 +1195,27 @@ export default function CalendarPage() {
                   <label style={{ fontSize:"11px", fontWeight:"700", color:"#888", display:"block", marginBottom:"4px" }}>СПЕЦИАЛНИ ЖЕЛАНИЯ</label>
                   <textarea value={form.notes} onChange={e => setForm((f:any) => ({...f,notes:e.target.value}))} placeholder="Ранно пристигане, паркинг, детско легло..."
                     style={{ width:"100%", border:"1px solid #dedad4", borderRadius:"8px", padding:"8px 11px", fontSize:"13px", background:"#faf9f7", color:"#111", resize:"none", height:"52px", outline:"none", boxSizing:"border-box" }} />
+                </div>
+                {/* v1.2 — CAPARO (deposit). Tick when received + write the
+                    amount. Used by the "Чакащо капаро" sidebar tab to chase
+                    overdue deposits. */}
+                <div style={{ marginTop:"9px", background: form.caparoReceived ? "#f0fdf4" : "#fff8ee", border:`1px solid ${form.caparoReceived ? "#bbf7d0" : "#fde68a"}`, borderRadius:"8px", padding:"10px 13px" }}>
+                  <label style={{ display:"flex", alignItems:"center", gap:"8px", cursor:"pointer" }}>
+                    <input type="checkbox" checked={form.caparoReceived === true}
+                      onChange={e => setForm((f:any) => ({...f, caparoReceived: e.target.checked}))} />
+                    <span style={{ fontSize:"12.5px", fontWeight:"700", color: form.caparoReceived ? "#166534" : "#92400e", letterSpacing:".02em" }}>
+                      {form.caparoReceived ? "✓ Капаро получено" : "Капаро получено?"}
+                    </span>
+                  </label>
+                  {form.caparoReceived && (
+                    <div style={{ marginTop:"8px", display:"flex", alignItems:"center", gap:"8px" }}>
+                      <label style={{ fontSize:"11px", fontWeight:"600", color:"#666" }}>Сума €</label>
+                      <input type="number" min="0" step="0.01" value={form.caparoAmount}
+                        onChange={e => setForm((f:any) => ({...f, caparoAmount: e.target.value}))}
+                        placeholder="0.00"
+                        style={{ flex:1, height:"30px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 9px", fontSize:"13px", background:"#fff", color:"#111", outline:"none" }} />
+                    </div>
+                  )}
                 </div>
                 <div style={{ background:"#f5f3ff", border:"1px solid #ddd3fe", borderRadius:"8px", padding:"9px 13px", marginTop:"9px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                   <div style={{ fontSize:"12px", color:"#6c63ff" }}>
@@ -1272,13 +1377,81 @@ export default function CalendarPage() {
         <div style={{ position:"fixed", inset:0, background:"#fff", zIndex:150, display:"flex", flexDirection:"column" }}>
           <div style={{ background:"#12121c", padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
             <span style={{ fontSize:"16px", fontWeight:"700", color:"#fff" }}>
-              {todayFullScreen === "res" ? `Резервации за ${fmtS(sel)}` : `Освобождавания за ${fmtS(sel)}`}
+              {todayFullScreen === "res"
+                ? `Резервации за ${fmtS(sel)}`
+                : todayFullScreen === "arr"
+                  ? `Пристигащи за ${fmtS(sel)}`
+                  : todayFullScreen === "caparo"
+                    ? "Чакащо капаро"
+                    : `Освобождавания за ${fmtS(sel)}`}
             </span>
             <button onClick={() => setTodayFullScreen(null)}
               style={{ background:"#1e1e2e", color:"#fff", border:"1px solid #2a2a40", borderRadius:"7px", width:"32px", height:"32px", cursor:"pointer", fontSize:"18px" }}>×</button>
           </div>
           <div style={{ flex:1, overflowY:"auto", padding:"16px" }}>
-            {todayFullScreen === "res" ? (
+            {todayFullScreen === "caparo" ? (
+              (() => {
+                // v1.2 — Pending caparo = confirmed reservations where
+                // caparoReceived is still false. Sorted oldest-first so
+                // the most overdue ones surface at the top.
+                const pending = reservations
+                  .filter((r: any) => r.status === "CONFIRMED" && r.caparoReceived !== true)
+                  .sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+                if (pending.length === 0) {
+                  return <div style={{ color:"#bbb", padding:"24px", textAlign:"center" }}>Няма чакащи капара 🎉</div>;
+                }
+                return pending.map((r: any) => {
+                  const ageMs = r.createdAt ? (Date.now() - new Date(r.createdAt).getTime()) : 0;
+                  const ageDays = Math.floor(ageMs / 86400000);
+                  const overdue = ageDays >= 2;
+                  return (
+                    <div key={r.id} onClick={() => { setTodayFullScreen(null); openEditRes(r); }}
+                      style={{ borderRadius:"12px", padding:"14px 16px", marginBottom:"10px", background: overdue ? "#fef2f2" : "#fffbf0", border:`1px solid ${overdue ? "#fecaca" : "#fde68a"}`, borderLeft:`4px solid ${overdue ? "#e11d48" : "#f59e0b"}`, cursor:"pointer" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"6px" }}>
+                        <div style={{ width:"36px", height:"36px", borderRadius:"50%", background: overdue ? "#e11d48" : "#f59e0b", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px", fontWeight:"700" }}>{(r.guestName||"?")[0]}</div>
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:"15px", fontWeight:"700", color:"#111" }}>{r.guestName}</div>
+                          <div style={{ fontSize:"12px", color:"#888" }}>Стая {r.roomCode} · {r.source}</div>
+                        </div>
+                        <div style={{ fontSize:"11px", padding:"3px 9px", borderRadius:"999px", background: overdue ? "#e11d48" : "#f59e0b", color:"#fff", fontWeight:"600" }}>
+                          {ageDays === 0 ? "днес" : ageDays === 1 ? "преди 1 ден" : `преди ${ageDays} дни`}
+                        </div>
+                      </div>
+                      <div style={{ fontSize:"12px", color:"#666" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))}{r.phone ? ` · ${r.phone}` : ""}</div>
+                      {overdue && (
+                        <div style={{ marginTop:"8px", fontSize:"11px", color:"#9f1239", fontWeight:"600" }}>
+                          ⚠ Над 2 дни без капаро — време е да напомниш
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
+              })()
+            ) : todayFullScreen === "arr" ? (
+              arrivalsToday.length === 0 ? <div style={{ color:"#bbb", padding:"20px", textAlign:"center" }}>Няма пристигащи за този ден.</div> :
+              arrivalsToday.map(r => {
+                const cs = resStyle(r);
+                return (
+                  <div key={r.id} onClick={() => { setTodayFullScreen(null); openEditRes(r); }}
+                    style={{ borderRadius:"12px", padding:"14px 16px", marginBottom:"10px", background:cs.bg, border:`1px solid ${cs.bd}`, borderLeft:`4px solid ${cs.bd}`, color:cs.tx, cursor:"pointer" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"8px" }}>
+                      <div style={{ width:"36px", height:"36px", borderRadius:"50%", background:cs.bd, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px", fontWeight:"700", color:"#fff" }}>{(r.guestName||"?")[0]}</div>
+                      <div>
+                        <div style={{ fontSize:"16px", fontWeight:"700" }}>{r.guestName}</div>
+                        <div style={{ fontSize:"13px", opacity:.75 }}>Стая {r.roomCode} · Вход {r.room?.entrance || ""}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize:"13px", opacity:.7 }}>{r.phone} · {r.email || ""}</div>
+                    <div style={{ fontSize:"13px", opacity:.7, marginTop:"4px" }}>{fmtS(r.startDate.slice(0,10))} — {fmtS(r.endDate.slice(0,10))} · {r.source}</div>
+                    {r.arrivalTime && <div style={{ fontSize:"12px", opacity:.8, marginTop:"4px", fontWeight:"600" }}>🕒 Пристига: {r.arrivalTime}</div>}
+                    {r.notes && <div style={{ fontSize:"12px", opacity:.6, marginTop:"4px", fontStyle:"italic" }}>{r.notes}</div>}
+                    <div style={{ display:"flex", gap:"8px", marginTop:"10px" }}>
+                      <span style={{ fontSize:"11px", padding:"3px 8px", borderRadius:"5px", background:cs.bd, color:"#fff" }}>{r.source}</span>
+                    </div>
+                  </div>
+                );
+              })
+            ) : todayFullScreen === "res" ? (
               activeToday.length === 0 ? <div style={{ color:"#bbb", padding:"20px", textAlign:"center" }}>Няма активни резервации.</div> :
               activeToday.map(r => {
                 const cs = resStyle(r);

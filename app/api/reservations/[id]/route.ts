@@ -26,6 +26,9 @@ const PatchInput = z.object({
   arrivalTime: z.string().optional(),
   departTime: z.string().optional(),
   guestLang: z.enum(["en","bg","de","fr","ru","uk","no"]).optional(),
+  // v1.2 — Caparo (deposit) tracking.
+  caparoReceived: z.boolean().optional(),
+  caparoAmount: z.any().optional(),
 }).strip();
 
 function normalizeDate(v: string | undefined): string | null | undefined {
@@ -74,6 +77,24 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   // If reverting a cancellation, clear cancelledAt in the same update
   if (update.status === "CONFIRMED") {
     update.cancelledAt = null;
+  }
+
+  // v1.2 — Caparo auto-stamp.
+  // When staff tick "capaparo получено" we record the timestamp and coerce
+  // the amount to a number. When they untick, we clear both timestamp and
+  // amount so the row goes back to "pending" correctly.
+  if (typeof update.caparoReceived === "boolean") {
+    if (update.caparoReceived) {
+      update.caparoReceivedAt = new Date().toISOString();
+      if (update.caparoAmount != null && update.caparoAmount !== "") {
+        const n = Number(update.caparoAmount);
+        update.caparoAmount = isFinite(n) && n >= 0 ? n : null;
+      }
+    } else {
+      update.caparoReceivedAt = null;
+      update.caparoAmount = null;
+      update.caparoReminderSentAt = null; // allow reminder to fire again on re-flag
+    }
   }
 
   const { data, error } = await supabaseAdmin

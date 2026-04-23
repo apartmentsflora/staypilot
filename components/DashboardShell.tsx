@@ -39,12 +39,14 @@ function notifIcon(type: string) {
   return Ico.info;
 }
 
-export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayCo, onVoice }: {
+export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayArrivals, onTodayCo, onPendingCaparo, onVoice }: {
   children: React.ReactNode;
   stats?: { active: number; occ: number; rev: number; month: number; selFmt: string };
   onNewRes?: () => void;
   onTodayRes?: () => void;
+  onTodayArrivals?: () => void;
   onTodayCo?: () => void;
+  onPendingCaparo?: () => void;
   onVoice?: () => void;
 }) {
   const pathname = usePathname();
@@ -152,6 +154,16 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
 
   const rooms39 = rooms.filter(r => r.entrance === "39").filter(r => !search || r.code.toLowerCase().includes(search.toLowerCase()) || r.label.toLowerCase().includes(search.toLowerCase()));
   const rooms41 = rooms.filter(r => r.entrance === "41").filter(r => !search || r.code.toLowerCase().includes(search.toLowerCase()) || r.label.toLowerCase().includes(search.toLowerCase()));
+  // v1.2 — Broaden the sidebar search to also match GUEST names. When the
+  // user types a name, show up to 8 matching reservations right under the
+  // search box. Clicking one jumps to the calendar page with the reservation
+  // id in the URL (`?open=<id>`) so the calendar can auto-open it.
+  const searchLc = search.trim().toLowerCase();
+  const matchingReservations = searchLc.length >= 2
+    ? reservations
+        .filter(r => (r.guestName || "").toLowerCase().includes(searchLc))
+        .slice(0, 8)
+    : [];
 
   // ── Design tokens ──────────────────────────────────────────────────────────
   const sb = {
@@ -190,8 +202,30 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
             </div>
             <div style={{ display:"flex", alignItems:"center", gap:"8px", background:"#fff", border:`1px solid ${sb.border}`, borderRadius:"8px", padding:"7px 10px" }}>
               <span style={{ color:"#b0b0b0", display:"flex", flexShrink:0 }}>{Ico.search}</span>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Търси стая..." style={{ background:"none", border:"none", outline:"none", color:"#333", fontSize:"12px", width:"100%" }} />
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Търси стая или гост..." style={{ background:"none", border:"none", outline:"none", color:"#333", fontSize:"12px", width:"100%" }} />
             </div>
+            {/* v1.2 — Guest-name search results (up to 8). Click → jump to
+                calendar with ?open=<id> so the existing page can auto-open it. */}
+            {matchingReservations.length > 0 && (
+              <div style={{ marginTop:"8px", background:"#fff", border:`1px solid ${sb.border}`, borderRadius:"8px", overflow:"hidden", maxHeight:"260px", overflowY:"auto" }}>
+                <div style={{ padding:"6px 10px", fontSize:"9.5px", fontWeight:"700", color:"#888", letterSpacing:".05em", textTransform:"uppercase", borderBottom:`1px solid ${sb.border}`, background:"#fafaf7" }}>
+                  Гости ({matchingReservations.length})
+                </div>
+                {matchingReservations.map((r: any) => (
+                  <button key={r.id}
+                    onClick={() => { setSearch(""); router.push(`/dashboard/calendar?open=${encodeURIComponent(r.id)}`); }}
+                    style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", padding:"7px 10px", fontSize:"11.5px", color:"#111", cursor:"pointer", borderBottom:"1px solid #f3f1ec" }}>
+                    <div style={{ fontWeight:"600", color:"#111", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{r.guestName}</div>
+                    <div style={{ fontSize:"10px", color:"#888", marginTop:"2px" }}>
+                      {r.roomCode ? `Стая ${r.roomCode} · ` : ""}
+                      {r.startDate ? String(r.startDate).slice(0,10) : ""}
+                      {r.endDate ? ` → ${String(r.endDate).slice(0,10)}` : ""}
+                      {r.status === "CANCELLED" ? " · анулирана" : ""}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Stats */}
@@ -240,9 +274,32 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayC
               <span style={{ display:"flex", color:"#16a34a" }}>{Ico.checkin}</span>Днешни резервации
             </button>
 
+            <button onClick={onTodayArrivals || (() => {})} style={{ ...btnBase, color:"#1e40af", borderColor:"#bfdbfe" }}>
+              <span style={{ display:"flex", color:"#2563eb" }}>{Ico.checkin}</span>Пристигащи днес
+            </button>
+
             <button onClick={onTodayCo || (() => {})} style={{ ...btnBase, color:"#92400e", borderColor:"#fcd34d" }}>
               <span style={{ display:"flex", color:"#d97706" }}>{Ico.checkout}</span>Днешни освобождавания
             </button>
+
+            {/* v1.2 — Pending caparo tab. Badge shows the count of confirmed
+                reservations with no caparo received. Hidden when count is 0
+                so it doesn't pull attention when there's nothing to chase. */}
+            {(() => {
+              const pendingCount = reservations.filter((r: any) =>
+                r.status === "CONFIRMED" && r.caparoReceived !== true
+              ).length;
+              return (
+                <button onClick={onPendingCaparo || (() => {})}
+                  style={{ ...btnBase, color: pendingCount > 0 ? "#9f1239" : "#666", borderColor: pendingCount > 0 ? "#fecdd3" : sb.border, position:"relative" }}>
+                  <span style={{ display:"flex", color: pendingCount > 0 ? "#e11d48" : sb.muted }}>{Ico.bell}</span>
+                  Чакащо капаро
+                  {pendingCount > 0 && (
+                    <span style={{ marginLeft:"auto", background:"#e11d48", color:"#fff", borderRadius:"10px", fontSize:"10px", fontWeight:"700", padding:"1px 7px", minWidth:"20px", textAlign:"center" }}>{pendingCount}</span>
+                  )}
+                </button>
+              );
+            })()}
 
             <button onClick={() => onVoice ? onVoice() : router.push("/dashboard/calendar?voice=1")} style={btnBase}>
               <span style={{ display:"flex", color:sb.muted }}>{Ico.mic}</span>Гласово попълване

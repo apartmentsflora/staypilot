@@ -525,11 +525,19 @@ async function upsertReservation(input: {
 }): Promise<{ action: "inserted" | "updated" | "cancelled" | "skipped" }> {
   const { data: existing } = await supabaseAdmin
     .from("Reservation")
-    .select("id, status")
+    .select('id, status, "createdAt"')
     .eq("externalRef", input.externalRef)
     .maybeSingle();
 
   const color = getRoomColor(input.roomCode);
+
+  // Suppress the "Промяна" echo for a booking that was just created by
+  // Flora's direct webhook (within the last 2 min). Without this, every
+  // Flora-website booking produces TWO notifications: "Нова резервация"
+  // from the website webhook + "Промяна" from the Beds24 echo ~2s later.
+  const justCreated = existing?.createdAt
+    ? (Date.now() - new Date(existing.createdAt).getTime()) < 2 * 60_000
+    : false;
 
   // ── Case 1: Cancellation ──
   if (input.isCancelled) {
@@ -574,11 +582,16 @@ async function upsertReservation(input: {
       .update(row)
       .eq("id", existing.id);
     if (updateErr) console.error("[beds24-wh] update failed:", updateErr.message);
-    await notify("SYSTEM",
-      `Beds24 · Промяна · ${input.roomCode}`,
-      `${input.guestName} · ${input.arrivalRaw} – ${input.departureRaw}`,
-      existing.id,
-    );
+    // Don't notify when this is the Beds24 echo of a brand-new Flora
+    // booking — the website webhook already fired "Нова резервация" 2s
+    // earlier. Real edits to older bookings still notify.
+    if (!justCreated) {
+      await notify("SYSTEM",
+        `Beds24 · Промяна · ${input.roomCode}`,
+        `${input.guestName} · ${input.arrivalRaw} – ${input.departureRaw}`,
+        existing.id,
+      );
+    }
     return { action: "updated" };
   }
 

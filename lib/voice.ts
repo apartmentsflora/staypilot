@@ -449,14 +449,29 @@ export const ALL_ROOM_CODES = [
 // Whisper outputs numbers as digits — "242" not "две четири две".
 // This table maps concatenated digit sequences to their room codes.
 // Longest keys first in iteration so "4101" matches before "41".
+// v1.2 — Also map spoken "entrance + room" shortcuts that guests /
+// operators use colloquially (e.g. "413" for "Стая 41-3" whose internal
+// code is "3.1"). Mapping is from physical label → internal code.
+//   39 + 0 + 1 → 39.0.1 (stays the same)
+//   41 + X  Y  → resolves to the code used in the DB (see Room table).
 const DIGIT_TO_ROOM: Record<string, string> = {
   "4101": "41.0.1",
   "4102": "41.0.2",
   "3901": "39.0.1",
+  // Entrance-41 physical numbers that users say as 3 digits.
+  //   411 → "Стая 41-1-1" (code 1.1)
+  //   412 → AMBIGUOUS between "Стая 41-2" (code 41-2) and "Апартамент 41-2" (code 2.2).
+  //         Prefer "41-2" since that's what most guests mean.
+  //   413 → "Стая 41-3" (code 3.1)
+  //   414 → AMBIGUOUS (41-4-1 / 41-4-2) — default to 4.1.
+  "411":  "1.1",
+  "412":  "41-2",
+  "413":  "3.1",
+  "414":  "4.1",
+  // Entrance-39 / apartment 3-digit shortcuts.
   "241":  "2.4.1",
   "242":  "2.4.2",
   "243":  "2.4.3",
-  "412":  "41-2",
   "13a":  "1.3A",
   "13а":  "1.3A",   // Cyrillic "а"
   "11":   "1.1",
@@ -614,6 +629,22 @@ export function matchRoomCode(transcript: string): string | null {
       if (fullyStripped === dk || fullyStripped.startsWith(dk)) {
         return DIGIT_TO_ROOM[dk];
       }
+    }
+  }
+
+  // 2c) v1.2 — Fallback for "в 413" / "ще е в 412" style phrases where
+  //     the user didn't say "стая" but still gave a 3-digit entrance+room
+  //     shortcut. Only 3+ digit sequences are considered to avoid
+  //     misreading 2-digit dates ("13 май") as rooms. Also requires the
+  //     sequence to be a WHOLE word (digit boundaries on both sides) so
+  //     phone numbers like "0888413555" don't hit it.
+  if (!hasRoomContext) {
+    const loweredForDigits = transcript.toLowerCase().replace(/а/g, "a");
+    const threeDigitRe = /(?<!\d)(\d{3,4})(?!\d)/g;
+    let dm: RegExpExecArray | null;
+    while ((dm = threeDigitRe.exec(loweredForDigits)) !== null) {
+      const seq = dm[1];
+      if (DIGIT_TO_ROOM[seq]) return DIGIT_TO_ROOM[seq];
     }
   }
 
@@ -1312,6 +1343,19 @@ function extractDurationNights(text: string): number | null {
       const n = parseNumberLike(tail);
       if (n != null && n >= 1 && n <= 60) { best = n; break; }
     }
+  }
+  if (best != null) return best;
+
+  // v1.2 — Looser fallback: "<cardinal> нощувки" ANYWHERE in the
+  // sentence, without requiring a "за" prefix. Catches phrasings like
+  // "Иван Пенев 30 април две нощувки стая 41 2" where the user just
+  // states the duration as a number-unit pair. Still scoped so it won't
+  // misread other nouns (only нощувк/нощи/нощ).
+  const bareNightsRe = /(?<![\p{L}])(\d{1,2}|една|един|едно|две|два|три|четири|пет|шест|седем|осем|девет|десет|единадесет|дванадесет|двайсет|тридесет)\s+(нощувк[аи]|нощи|нощ)(?![\p{L}])/gu;
+  let bm: RegExpExecArray | null;
+  while ((bm = bareNightsRe.exec(s)) !== null) {
+    const n = parseNumberLike(bm[1]);
+    if (n != null && n >= 1 && n <= 60) { best = n; break; }
   }
   if (best != null) return best;
 

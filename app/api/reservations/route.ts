@@ -27,6 +27,11 @@ const ReservationInput = z.object({
   pricePerNight: z.union([z.string(), z.number()]).optional(),
   arrivalTime: z.string().optional(),
   departTime: z.string().optional(),
+  // v1.2 — Caparo (deposit) fields. When the operator already collected
+  // the deposit at booking time, they can tick the box and enter the
+  // amount as part of the create flow.
+  caparoReceived: z.boolean().optional(),
+  caparoAmount: z.union([z.string(), z.number()]).optional().nullable(),
 });
 
 function toIsoOrNull(v: string): string | null {
@@ -117,6 +122,10 @@ export async function POST(req: Request) {
       ? Number(parsed.data.pricePerNight) : null,
     arrivalTime: parsed.data.arrivalTime || "14:00",
     departTime: parsed.data.departTime || "11:00",
+    caparoReceived: parsed.data.caparoReceived === true,
+    caparoAmount: parsed.data.caparoAmount != null && parsed.data.caparoAmount !== ""
+      ? Number(parsed.data.caparoAmount) : null,
+    caparoReceivedAt: parsed.data.caparoReceived === true ? new Date().toISOString() : null,
   }).select().single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

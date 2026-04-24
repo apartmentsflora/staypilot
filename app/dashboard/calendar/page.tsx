@@ -175,6 +175,9 @@ export default function CalendarPage() {
     // v1.2 — Caparo reminders (2-day no-caparo alerts). Idempotent: the
     // server only reminds reservations it hasn't already reminded.
     try { await fetch("/api/caparo/check-reminders"); } catch { /* non-fatal */ }
+    // v1.2 C2 — Auto-cancel bookings without caparo after 36h. Idempotent
+    // — any row already CANCELLED is skipped by the DB filter.
+    try { await fetch("/api/caparo/auto-cancel"); } catch { /* non-fatal */ }
     setSyncing(false);
     syncingRef.current = false;
   }, [load]);

@@ -197,6 +197,11 @@ export default function SettingsPage() {
         </div>
 
         {/* Webhook URLs */}
+        {/* v1.2 — B6: per-room admin config (cot eligibility, capacity,
+            max with cot). Reads /api/rooms, writes to /api/rooms/[id]
+            with PATCH. Only visible to ADMIN role. */}
+        <RoomsConfigCard />
+
         <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"16px 18px" }}>
           <div style={{ fontSize:"14px", fontWeight:"700", marginBottom:"14px" }}>Webhook адреси</div>
           {WEBHOOK_URLS.map((w, i) => (
@@ -214,3 +219,104 @@ export default function SettingsPage() {
     </DashboardShell>
   );
 }
+
+// v1.2 — B6: rooms config editor. Separate component so it has its own
+// fetch lifecycle and doesn't entangle with the rest of the Settings page.
+function RoomsConfigCard() {
+  const [rooms, setRooms] = useState<any[]>([]);
+  const [saving, setSaving] = useState<string>("");
+  const [savedMsg, setSavedMsg] = useState<string>("");
+
+  useEffect(() => {
+    fetch("/api/rooms").then(r => r.json()).then(d => {
+      if (Array.isArray(d)) setRooms(d);
+    }).catch(() => {});
+  }, []);
+
+  async function patchRoom(id: string, patch: Record<string, any>) {
+    setSaving(id);
+    setSavedMsg("");
+    try {
+      const res = await fetch(`/api/rooms/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setRooms(rs => rs.map(r => r.id === id ? { ...r, ...updated } : r));
+        setSavedMsg("Запазено");
+        setTimeout(() => setSavedMsg(""), 1500);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setSavedMsg("Грешка: " + (err.error || res.status));
+      }
+    } finally {
+      setSaving("");
+    }
+  }
+
+  return (
+    <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #e5e2dc", padding:"16px 18px", marginBottom:"14px" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"14px" }}>
+        <div style={{ fontSize:"14px", fontWeight:"700" }}>Стаи · настройки</div>
+        {savedMsg && <div style={{ fontSize:"11px", color: savedMsg.startsWith("Грешка") ? "#b91c1c" : "#15803d" }}>{savedMsg}</div>}
+      </div>
+      <div style={{ fontSize:"11px", color:"#888", marginBottom:"10px", lineHeight:"1.5" }}>
+        Редактирай вместимост, допустимост на кошара и максимум гости с кошара за всяка стая. Промените се записват веднага.
+      </div>
+      <div style={{ overflowX:"auto" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"12px" }}>
+          <thead>
+            <tr style={{ background:"#faf9f7" }}>
+              <th style={thStyle}>Код</th>
+              <th style={thStyle}>Име</th>
+              <th style={thStyle} title="Максимум гости в стаята">Макс. гости</th>
+              <th style={thStyle} title="Възможна ли е бебешка кошара">Кошара</th>
+              <th style={thStyle} title="Максимум гости когато има кошара">Макс. с кошара</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rooms.map(r => {
+              const isSaving = saving === r.id;
+              return (
+                <tr key={r.id} style={{ borderBottom:"1px solid #f0ede8", opacity: isSaving ? 0.5 : 1 }}>
+                  <td style={tdStyle}><code style={{ fontSize:"11px", color:"#6c63ff" }}>{r.code}</code></td>
+                  <td style={tdStyle}>{r.label}</td>
+                  <td style={tdStyle}>
+                    <input type="number" min={1} max={12} defaultValue={r.capacity}
+                      onBlur={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v) && v !== r.capacity) patchRoom(r.id, { capacity: v });
+                      }}
+                      style={{ width:"60px", height:"26px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 7px", fontSize:"12px", textAlign:"center", background:"#fff" }} />
+                  </td>
+                  <td style={{ ...tdStyle, textAlign:"center" }}>
+                    <input type="checkbox" checked={r.cotEligible === true}
+                      onChange={(e) => patchRoom(r.id, { cotEligible: e.target.checked })} />
+                  </td>
+                  <td style={tdStyle}>
+                    <input type="number" min={1} max={12}
+                      disabled={!r.cotEligible}
+                      defaultValue={r.maxGuestsWithCot ?? r.capacity}
+                      onBlur={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v) && v !== (r.maxGuestsWithCot ?? r.capacity)) patchRoom(r.id, { maxGuestsWithCot: v });
+                      }}
+                      style={{ width:"60px", height:"26px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 7px", fontSize:"12px", textAlign:"center", background: r.cotEligible ? "#fff" : "#f5f3ef" }} />
+                  </td>
+                </tr>
+              );
+            })}
+            {rooms.length === 0 && (
+              <tr><td colSpan={5} style={{ padding:"16px", textAlign:"center", color:"#aaa" }}>Зареждане…</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const thStyle = { padding:"8px 10px", fontSize:"10.5px", fontWeight:"700" as const, color:"#888", textTransform:"uppercase" as const, letterSpacing:".05em", textAlign:"left" as const, borderBottom:"1px solid #eee" };
+const tdStyle = { padding:"8px 10px", verticalAlign:"middle" as const };

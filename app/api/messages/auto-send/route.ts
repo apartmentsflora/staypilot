@@ -69,6 +69,9 @@ function buildTemplateData(res: any): TemplateData {
     departTime: res.departTime || "11:00",
     notes: res.notes || "",
     lang,
+    // v1.2 B8/B9: parking opt-in flows into the welcome email so it
+    // renders "reserved" or "Green Zone fallback" accordingly.
+    parking: res.parking === true,
   };
 }
 

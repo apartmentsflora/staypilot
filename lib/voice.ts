@@ -441,9 +441,16 @@ export function parseBGDate(phrase: string, ctx: { now: Date; year: number }): s
 // 5. Room code matching
 // ──────────────────────────────────────────────────────────────────────────
 
+// Room codes in the new Beds24-matching convention.
+// Entrance 41 → "41.x[.y]"  · Entrance 39 → "39.x[.y]"
+// Two exceptions keep their Beds24-literal names:
+//   "41-2"           → Апартамент 41-2 (disambiguates from studio "41.2")
+//   "Двустаен партер" → ground-floor apartment at entrance 39
 export const ALL_ROOM_CODES = [
-  "39.0.1", "1.3", "1.3A", "1.5", "2.4.1", "2.4.2", "2.4.3", "2.5", "5.5",
-  "41.0.1", "41.0.2", "1.1", "1.2", "2.2", "41-2", "3.1", "4.1", "4.2",
+  "39.0.1", "39.1.3", "39.1.3а", "39.1.5", "39.2.4.1", "39.2.4.2", "39.2.4.3",
+  "39.2.5", "39.5.5",
+  "41.0.1", "Двустаен партер", "41.1.1", "41.1.2", "41-2", "41.2", "41.3",
+  "41.4.1", "41.4.2",
 ];
 
 // Whisper outputs numbers as digits — "242" not "две четири две".
@@ -454,36 +461,35 @@ export const ALL_ROOM_CODES = [
 // code is "3.1"). Mapping is from physical label → internal code.
 //   39 + 0 + 1 → 39.0.1 (stays the same)
 //   41 + X  Y  → resolves to the code used in the DB (see Room table).
+// Whisper / operator spoken-digit shortcuts → new canonical room codes.
+//   "412" is ambiguous: Studio 41-2 (code "41.2") vs Apartment 41-2 (code
+//   "41-2"). Prefer the studio since most guests book it. "414" is
+//   similarly ambiguous between 41.4.1 and 41.4.2 — default to 41.4.1.
 const DIGIT_TO_ROOM: Record<string, string> = {
   "4101": "41.0.1",
-  "4102": "41.0.2",
   "3901": "39.0.1",
-  // Entrance-41 physical numbers that users say as 3 digits.
-  //   411 → "Стая 41-1-1" (code 1.1)
-  //   412 → AMBIGUOUS between "Стая 41-2" (code 41-2) and "Апартамент 41-2" (code 2.2).
-  //         Prefer "41-2" since that's what most guests mean.
-  //   413 → "Стая 41-3" (code 3.1)
-  //   414 → AMBIGUOUS (41-4-1 / 41-4-2) — default to 4.1.
-  "411":  "1.1",
-  "412":  "41-2",
-  "413":  "3.1",
-  "414":  "4.1",
+  // Entrance-41 physical numbers said as 3 digits.
+  "411":  "41.1.1",
+  "412":  "41.2",
+  "413":  "41.3",
+  "414":  "41.4.1",
   // Entrance-39 / apartment 3-digit shortcuts.
-  "241":  "2.4.1",
-  "242":  "2.4.2",
-  "243":  "2.4.3",
-  "13a":  "1.3A",
-  "13а":  "1.3A",   // Cyrillic "а"
-  "11":   "1.1",
-  "12":   "1.2",
-  "13":   "1.3",
-  "15":   "1.5",
-  "22":   "2.2",
-  "25":   "2.5",
-  "31":   "3.1",
-  "41":   "4.1",
-  "42":   "4.2",
-  "55":   "5.5",
+  "3924": "39.2.4.1",
+  "241":  "39.2.4.1",
+  "242":  "39.2.4.2",
+  "243":  "39.2.4.3",
+  "13a":  "39.1.3а",
+  "13а":  "39.1.3а",
+  "11":   "41.1.1",
+  "12":   "41.1.2",
+  "13":   "39.1.3",
+  "15":   "39.1.5",
+  "22":   "41-2",       // spoken "двайсет и две" / "22" → apartment 41-2
+  "25":   "39.2.5",
+  "31":   "41.3",
+  "41":   "41.4.1",
+  "42":   "41.4.2",
+  "55":   "39.5.5",
 };
 // Sorted longest-first for greedy matching
 const DIGIT_ROOM_KEYS = Object.keys(DIGIT_TO_ROOM).sort((a, b) => b.length - a.length);
@@ -542,7 +548,8 @@ function normalizeCodeTokens(s: string): string {
   return t;
 }
 
-// Longest-first, so "1.3A" wins over "1.3" and "39.0.1" wins over "1.5".
+// Longest-first, so "39.1.3а" wins over "39.1.3" and multi-part codes
+// always beat their shorter prefixes during greedy matching.
 const ROOM_CODES_BY_LEN = [...ALL_ROOM_CODES].sort((a, b) => b.length - a.length);
 
 /**

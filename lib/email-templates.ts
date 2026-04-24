@@ -32,6 +32,10 @@ export interface TemplateData {
   departTime: string;
   notes?: string;    // special requests
   lang?: GuestLang;
+  // v1.2 — B8/B9: whether the guest opted into the underground parking
+  // at booking time. Controls which paragraph renders in the amenities
+  // block (reserved-confirmation vs. Green Zone fallback).
+  parking?: boolean;
 }
 
 const GOOGLE_REVIEW_URL =
@@ -67,6 +71,13 @@ interface WelcomeStrings {
   depositRef: (room: string, checkin: string, checkout: string) => string;
   depositNote: string;
   lateCheckinWarning: string;
+  // v1.2 — Arrival amenities: EV charging + parking (underground opt-in
+  // vs. Green Zone fallback). One block, two paragraphs.
+  evTitle?: string;
+  evText?: string;
+  parkingTitle?: string;
+  parkingSelected?: string;
+  parkingFallback?: string;
   // Self check-in instructions block
   selfCheckinTitle: string;
   selfCheckinStep1: string;
@@ -119,7 +130,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Welcome to Apartments Flora, ${n}!`,
     depositImportant: "IMPORTANT",
     depositMsg: (amt) => `To confirm your reservation, a deposit of 50% &mdash; &euro;${amt} is required`,
-    depositWithin: `within <strong style="color:#C9A84C">3 business days</strong> from the date of the reservation.`,
+    depositWithin: `The deposit must be received in our bank account within <strong style="color:#C9A84C">24 hours</strong> of the booking — otherwise the reservation will be voided.`,
     depositBankTitle: "Bank Transfer",
     depositRecipientLabel: "RECIPIENT",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -137,6 +148,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Proceed to your room and settle in. Towels and linens are prepared for you",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "If you need assistance, call us at: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 EV charging",
+    evText: "An EV charging station is located right in front of the building.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Parking",
+    parkingSelected: "Your underground parking space is reserved &mdash; &euro;10/day, payable at check-in.",
+    parkingFallback: "You haven&rsquo;t selected underground parking. You can park nearby in the <strong>Green Zone</strong> &mdash; &euro;1/hour, weekdays 9:00&ndash;19:00, weekends 11:00&ndash;20:00. Alternatives: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   bg: {
     heading: "Вашата резервация е потвърдена",
@@ -155,7 +171,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Добре дошли в Apartments Flora, ${n}!`,
     depositImportant: "ВАЖНО",
     depositMsg: (amt) => `За потвърждение на резервацията е необходимо заплащане на капаро 50% &mdash; &euro;${amt}`,
-    depositWithin: `в рамките на <strong style="color:#C9A84C">3 дни</strong> от датата на резервацията.`,
+    depositWithin: `Капарото трябва да постъпи по банковата ни сметка в рамките на <strong style="color:#C9A84C">24 часа</strong> от направената резервация — в противен случай резервацията се анулира.`,
     depositBankTitle: "Банков превод",
     depositRecipientLabel: "ПОЛУЧАТЕЛ",
     depositRecipient: `&ldquo;Билдингс&rdquo; ЕООД`,
@@ -173,6 +189,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Настанете се в стаята. Кърпи и спално бельо са подготвени за Вас",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "При нужда от помощ, обадете се на: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Зареждане на електромобил",
+    evText: "Зарядна станция за електромобили е разположена точно пред сградата.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Паркинг",
+    parkingSelected: "Вашето подземно място е запазено &mdash; &euro;10/ден, плащане при настаняване.",
+    parkingFallback: "Не сте избрали подземен паркинг. Наблизо можете да паркирате в <strong>Зелена зона</strong> &mdash; &euro;1/час, делник 9:00&ndash;19:00, уикенд 11:00&ndash;20:00. Алтернативно: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   de: {
     heading: "Ihre Reservierung ist bestätigt",
@@ -191,7 +212,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Willkommen bei Apartments Flora, ${n}!`,
     depositImportant: "WICHTIG",
     depositMsg: (amt) => `Zur Bestätigung Ihrer Reservierung ist eine Anzahlung von 50% &mdash; &euro;${amt} erforderlich`,
-    depositWithin: `innerhalb von <strong style="color:#C9A84C">3 Werktagen</strong> ab dem Datum der Reservierung.`,
+    depositWithin: `Die Anzahlung muss innerhalb von <strong style="color:#C9A84C">24 Stunden</strong> nach der Buchung auf unserem Bankkonto eingegangen sein — andernfalls wird die Reservierung storniert.`,
     depositBankTitle: "Banküberweisung",
     depositRecipientLabel: "EMPFÄNGER",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -209,6 +230,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Gehen Sie zu Ihrem Zimmer. Handt&uuml;cher und Bettw&auml;sche sind f&uuml;r Sie vorbereitet",
     selfCheckinWifi: "WLAN",
     selfCheckinContact: "Falls Sie Hilfe ben&ouml;tigen, rufen Sie uns an: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Ladestation",
+    evText: "Eine Ladestation f&uuml;r Elektroautos befindet sich direkt vor dem Geb&auml;ude.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Parken",
+    parkingSelected: "Ihr Tiefgaragenplatz ist reserviert &mdash; 10&euro;/Tag, zahlbar bei der Anreise.",
+    parkingFallback: "Sie haben keine Tiefgarage gew&auml;hlt. Parken k&ouml;nnen Sie in der Nachbarschaft in der <strong>Gr&uuml;nen Zone</strong> &mdash; 1&euro;/Stunde, werktags 9:00&ndash;19:00, am Wochenende 11:00&ndash;20:00. Alternativen: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   fr: {
     heading: "Votre réservation est confirmée",
@@ -227,7 +253,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Bienvenue à Apartments Flora, ${n} !`,
     depositImportant: "IMPORTANT",
     depositMsg: (amt) => `Pour confirmer votre réservation, un acompte de 50% &mdash; &euro;${amt} est requis`,
-    depositWithin: `dans un d&eacute;lai de <strong style="color:#C9A84C">3 jours ouvrables</strong> &agrave; compter de la date de la r&eacute;servation.`,
+    depositWithin: `L&rsquo;acompte doit &ecirc;tre re&ccedil;u sur notre compte bancaire dans un d&eacute;lai de <strong style="color:#C9A84C">24 heures</strong> apr&egrave;s la r&eacute;servation &mdash; sinon la r&eacute;servation sera annul&eacute;e.`,
     depositBankTitle: "Virement bancaire",
     depositRecipientLabel: "BÉNÉFICIAIRE",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -245,6 +271,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Installez-vous dans votre chambre. Serviettes et draps sont pr&eacute;par&eacute;s pour vous",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "Si vous avez besoin d&rsquo;aide, appelez-nous au : <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Borne de recharge",
+    evText: "Une borne de recharge pour v&eacute;hicules &eacute;lectriques se trouve juste devant le b&acirc;timent.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Stationnement",
+    parkingSelected: "Votre place en parking souterrain est r&eacute;serv&eacute;e &mdash; 10&euro;/jour, payable &agrave; l&rsquo;arriv&eacute;e.",
+    parkingFallback: "Vous n&rsquo;avez pas choisi le parking souterrain. Vous pouvez stationner &agrave; proximit&eacute; dans la <strong>Zone Verte</strong> &mdash; 1&euro;/heure, en semaine 9h00&ndash;19h00, week-ends 11h00&ndash;20h00. Alternatives : <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   ru: {
     heading: "Ваша бронь подтверждена",
@@ -263,7 +294,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Добро пожаловать в Apartments Flora, ${n}!`,
     depositImportant: "ВАЖНО",
     depositMsg: (amt) => `Для подтверждения бронирования необходима предоплата 50% &mdash; &euro;${amt}`,
-    depositWithin: `в течение <strong style="color:#C9A84C">3 рабочих дней</strong> с даты бронирования.`,
+    depositWithin: `Задаток должен поступить на наш банковский счёт в течение <strong style="color:#C9A84C">24 часов</strong> с момента бронирования — в противном случае бронирование будет аннулировано.`,
     depositBankTitle: "Банковский перевод",
     depositRecipientLabel: "ПОЛУЧАТЕЛЬ",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -281,6 +312,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Расположитесь в номере. Полотенца и постельное бельё подгото��лены для Вас",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "Если Вам нужна помощь, позвоните нам: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Зарядка электромобиля",
+    evText: "Зарядная станция для электромобилей находится прямо перед зданием.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Парковка",
+    parkingSelected: "Ваше место в подземной парковке забронировано &mdash; 10&euro;/день, оплата при заезде.",
+    parkingFallback: "Вы не выбрали подземную парковку. Рядом можно парковаться в <strong>Зелёной зоне</strong> &mdash; 1&euro;/час, будни 9:00&ndash;19:00, выходные 11:00&ndash;20:00. Альтернативы: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   uk: {
     heading: "Ваше бронювання підтверджено",
@@ -299,7 +335,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Ласкаво просимо до Apartments Flora, ${n}!`,
     depositImportant: "ВАЖЛИВО",
     depositMsg: (amt) => `Для підтвердження бронювання необхідна передоплата 50% &mdash; &euro;${amt}`,
-    depositWithin: `протягом <strong style="color:#C9A84C">3 робочих днів</strong> з дати бронювання.`,
+    depositWithin: `Завдаток має надійти на наш банківський рахунок протягом <strong style="color:#C9A84C">24 годин</strong> з моменту бронювання — інакше бронювання буде скасовано.`,
     depositBankTitle: "Банківський переказ",
     depositRecipientLabel: "ОДЕРЖУВАЧ",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -317,6 +353,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "Розташуйтесь у номері. Рушники та постільна білизна підготовлені для Вас",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "Якщо Вам потрібна допомога, зателефонуйте нам: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Зарядка електромобіля",
+    evText: "Зарядна станція для електромобілів розташована прямо перед будівлею.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Паркінг",
+    parkingSelected: "Ваше місце на підземному паркінгу заброньовано &mdash; 10&euro;/день, оплата при заїзді.",
+    parkingFallback: "Ви не обрали підземний паркінг. Поруч можна паркуватися у <strong>Зеленій зоні</strong> &mdash; 1&euro;/год, будні 9:00&ndash;19:00, вихідні 11:00&ndash;20:00. Альтернативи: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
   no: {
     heading: "Din reservasjon er bekreftet",
@@ -335,7 +376,7 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     subject: (n) => `Velkommen til Apartments Flora, ${n}!`,
     depositImportant: "VIKTIG",
     depositMsg: (amt) => `For å bekrefte reservasjonen din kreves et depositum på 50% &mdash; &euro;${amt}`,
-    depositWithin: `innen <strong style="color:#C9A84C">3 virkedager</strong> fra reservasjonsdatoen.`,
+    depositWithin: `Depositumet må være mottatt på vår bankkonto innen <strong style="color:#C9A84C">24 timer</strong> etter bestillingen — ellers blir reservasjonen annullert.`,
     depositBankTitle: "Bankoverføring",
     depositRecipientLabel: "MOTTAKER",
     depositRecipient: `&ldquo;Buildings&rdquo; EOOD`,
@@ -353,6 +394,11 @@ const welcomeI18n: Record<GuestLang, WelcomeStrings> = {
     selfCheckinStep4: "G&aring; til rommet ditt. H&aring;ndklær og sengetøy er klargjort for deg",
     selfCheckinWifi: "Wi-Fi",
     selfCheckinContact: "Trenger du hjelp, ring oss p&aring;: <strong>+359 879 559 961</strong>",
+    evTitle: "\u26A1 Ladestasjon",
+    evText: "En ladestasjon for elbiler ligger rett foran bygningen.",
+    parkingTitle: "\ud83c\udd7f\ufe0f Parkering",
+    parkingSelected: "Din underjordiske parkeringsplass er reservert &mdash; 10&euro;/dag, betales ved innsjekk.",
+    parkingFallback: "Du har ikke valgt underjordisk parkering. Du kan parkere i n&aelig;rheten i <strong>Gr&oslash;nn sone</strong> &mdash; 1&euro;/time, ukedager 9:00&ndash;19:00, helg 11:00&ndash;20:00. Alternativer: <a href=\"https://myburgas.com/transport/parking/parking-gurko/\" style=\"color:#1e40af;text-decoration:underline\">Parking Gurko</a>.",
   },
 };
 
@@ -520,25 +566,29 @@ const waI18n: Record<GuestLang, WhatsAppStrings> = {
  * Selling display names — used ONLY in guest-facing emails & WhatsApp.
  * Nowhere else in StayPilot should reference these; the system uses room codes.
  */
+// Keys are the NEW canonical room codes that match Beds24 1-to-1 with an
+// entrance-number prefix (41 = Ivan Bogorov 41, 39 = Ivan Bogorov 39).
+// The ground-floor apartment with Beds24 label "Двустаен партер" has no
+// numeric prefix — its code is the Bulgarian label verbatim.
 const ROOM_DISPLAY_NAMES: Record<string, string> = {
-  "4.2":    "The Horizon",
-  "3.1":    "The Lookout",
-  "41.2":   "Sea Glimpse",
-  "4.1":    "The Sunset",
-  "2.2":    "Corner Suite",
-  "1.2":    "Golden Morning",
-  "1.1":    "Orchid Balcony",
-  "41.0.1": "The Birdsong",
-  "41.0.2": "Garden Apartment",
-  "2.4.2":  "The Lantern",
-  "2.4.3":  "Afternoon Sun",
-  "2.4.1":  "Poppy Apartment",
-  "1.5":    "The Quartet",
-  "1.3":    "Tulip Studio",
-  "1.3A":   "Green Canopy",
-  "39.0.1": "Welcome Garden",
-  "2.5":    "Park Gate",
-  "5.5":    "Morning Light",
+  "41.4.2":         "The Horizon",
+  "41.3":           "The Lookout",
+  "41.2":           "Sea Glimpse",
+  "41.4.1":         "The Sunset",
+  "41-2":           "Corner Suite",
+  "41.1.2":         "Golden Morning",
+  "41.1.1":         "Orchid Balcony",
+  "41.0.1":         "The Birdsong",
+  "Двустаен партер":"Garden Apartment",
+  "39.2.4.2":       "The Lantern",
+  "39.2.4.3":       "Afternoon Sun",
+  "39.2.4.1":       "Poppy Apartment",
+  "39.1.5":         "The Quartet",
+  "39.1.3":         "Tulip Studio",
+  "39.1.3а":        "Green Canopy",
+  "39.0.1":         "Welcome Garden",
+  "39.2.5":         "Park Gate",
+  "39.5.5":         "Morning Light",
 };
 
 /** Resolve room code → selling name for emails. Falls back to code if unknown. */
@@ -716,6 +766,17 @@ export function welcomeEmailHtml(d: TemplateData): string {
           </td></tr>
 
         </table>
+
+      <!-- ══ v1.2 ARRIVAL AMENITIES (EV + parking) ══ -->
+      ${t.evTitle ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f0f7ff;border-left:4px solid #3b82f6;border-radius:8px;margin:0 0 28px">
+        <tr><td style="padding:16px 20px">
+          <p style="margin:0 0 4px;font-size:13px;font-weight:700;color:#1e40af;font-family:Georgia,serif">${t.evTitle}</p>
+          <p style="margin:0 0 14px;font-size:13.5px;line-height:1.6;color:#1e3a5f;font-family:Georgia,serif">${t.evText}</p>
+          <p style="margin:0 0 4px;font-size:13px;font-weight:700;color:#1e40af;font-family:Georgia,serif">${t.parkingTitle}</p>
+          <p style="margin:0;font-size:13.5px;line-height:1.6;color:#1e3a5f;font-family:Georgia,serif">${d.parking ? t.parkingSelected : t.parkingFallback}</p>
+        </td></tr>
+      </table>` : ``}
 
       <!-- ══ SELF CHECK-IN INSTRUCTIONS (shown for late arrivals ≥ 18:00) ══ -->
       ${d.arrivalTime >= "18:00" ? `
@@ -905,6 +966,142 @@ export function whatsappLink(phone: string, text: string): string {
   // Strip everything except digits and leading +
   const cleaned = phone.replace(/[^\d+]/g, "").replace(/^\+/, "");
   return `https://wa.me/${cleaned}?text=${encodeURIComponent(text)}`;
+}
+
+/* ── v1.2 C2: Caparo auto-cancel email ────────────────────────────────────
+ * Sent automatically when a confirmed reservation has no caparo after 36h.
+ * The booking has already been flipped to CANCELLED in the DB and pushed
+ * to Beds24 (freeing the dates on Booking.com/Airbnb). This is the guest
+ * notification — apology + invitation to re-book.
+ * Per-language copy kept simple so translation review is easy.
+ */
+interface CaparoCancelStrings {
+  subject: (name: string) => string;
+  heading: string;
+  greeting: (name: string) => string;
+  body1: string;
+  body2: string;
+  closing: string;
+  team: string;
+  rebookCta: string;
+  rebookUrl: string;
+}
+
+const caparoCancelI18n: Record<GuestLang, CaparoCancelStrings> = {
+  en: {
+    subject: (n) => `Your reservation at Apartments Flora has been cancelled, ${n}`,
+    heading: "Reservation cancelled",
+    greeting: (n) => `Dear ${n},`,
+    body1: "We regret to inform you that, because the deposit was not received within 24&nbsp;hours of your booking, your reservation at <strong>Apartments Flora</strong> has been cancelled automatically.",
+    body2: "The dates are now released. If you still wish to stay with us, you are very welcome to book again &mdash; we&rsquo;d be delighted to host you.",
+    closing: "Thank you for your understanding.",
+    team: "The Flora Team",
+    rebookCta: "Book again",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  bg: {
+    subject: (n) => `Вашата резервация в Apartments Flora е анулирана, ${n}`,
+    heading: "Резервацията е анулирана",
+    greeting: (n) => `Скъпи/а ${n},`,
+    body1: "С&nbsp;настоящото Ви уведомяваме, че поради неполучено капаро в&nbsp;срок от&nbsp;24&nbsp;часа, Вашата резервация в&nbsp;<strong>Apartments Flora</strong> беше анулирана автоматично.",
+    body2: "Датите вече са освободени. Ако все още желаете да бъдете наш гост, каним Ви да направите нова резервация &mdash; ще се радваме да Ви посрещнем.",
+    closing: "Благодарим за разбирането.",
+    team: "Екипът на Flora",
+    rebookCta: "Резервирай отново",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  de: {
+    subject: (n) => `Ihre Reservierung bei Apartments Flora wurde storniert, ${n}`,
+    heading: "Reservierung storniert",
+    greeting: (n) => `Liebe/r ${n},`,
+    body1: "Leider m&uuml;ssen wir Ihnen mitteilen, dass Ihre Reservierung bei <strong>Apartments Flora</strong> automatisch storniert wurde, da die Anzahlung nicht innerhalb von 24&nbsp;Stunden nach der Buchung bei uns eingegangen ist.",
+    body2: "Die Daten sind jetzt wieder verf&uuml;gbar. Wenn Sie weiterhin bei uns &uuml;bernachten m&ouml;chten, sind Sie herzlich eingeladen, erneut zu buchen.",
+    closing: "Danke f&uuml;r Ihr Verst&auml;ndnis.",
+    team: "Das Flora Team",
+    rebookCta: "Erneut buchen",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  fr: {
+    subject: (n) => `Votre r&eacute;servation aux Apartments Flora a &eacute;t&eacute; annul&eacute;e, ${n}`,
+    heading: "R&eacute;servation annul&eacute;e",
+    greeting: (n) => `Cher/Ch&egrave;re ${n},`,
+    body1: "Nous avons le regret de vous informer que, l&rsquo;acompte n&rsquo;ayant pas &eacute;t&eacute; re&ccedil;u dans les 24&nbsp;heures suivant votre r&eacute;servation, votre r&eacute;servation aux <strong>Apartments Flora</strong> a &eacute;t&eacute; automatiquement annul&eacute;e.",
+    body2: "Les dates sont &agrave; nouveau disponibles. Si vous souhaitez toujours s&eacute;journer chez nous, n&rsquo;h&eacute;sitez pas &agrave; r&eacute;server &agrave; nouveau.",
+    closing: "Merci de votre compr&eacute;hension.",
+    team: "L&rsquo;&eacute;quipe Flora",
+    rebookCta: "R&eacute;server &agrave; nouveau",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  ru: {
+    subject: (n) => `Ваше бронирование в Apartments Flora отменено, ${n}`,
+    heading: "Бронирование отменено",
+    greeting: (n) => `Уважаемый/ая ${n},`,
+    body1: "С&nbsp;сожалением сообщаем, что, поскольку задаток не&nbsp;поступил в&nbsp;течение 24&nbsp;часов с&nbsp;момента бронирования, Ваше бронирование в&nbsp;<strong>Apartments Flora</strong> было автоматически отменено.",
+    body2: "Даты теперь свободны. Если Вы всё ещё хотите остановиться у&nbsp;нас, приглашаем Вас забронировать снова &mdash; будем рады принять Вас.",
+    closing: "Благодарим за понимание.",
+    team: "Команда Flora",
+    rebookCta: "Забронировать снова",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  uk: {
+    subject: (n) => `Ваше бронювання в Apartments Flora скасовано, ${n}`,
+    heading: "Бронювання скасовано",
+    greeting: (n) => `Шановний/а ${n},`,
+    body1: "Зі шкодою повідомляємо, що оскільки завдаток не&nbsp;надійшов протягом 24&nbsp;годин з&nbsp;моменту бронювання, Ваше бронювання в&nbsp;<strong>Apartments Flora</strong> було автоматично скасовано.",
+    body2: "Дати тепер вільні. Якщо Ви все ще бажаєте зупинитися в&nbsp;нас, запрошуємо забронювати знову &mdash; ми будемо раді прийняти Вас.",
+    closing: "Дякуємо за розуміння.",
+    team: "Команда Flora",
+    rebookCta: "Забронювати знову",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+  no: {
+    subject: (n) => `Din reservasjon hos Apartments Flora er kansellert, ${n}`,
+    heading: "Reservasjon kansellert",
+    greeting: (n) => `Kj&aelig;re ${n},`,
+    body1: "Vi m&aring; dessverre informere om at reservasjonen din hos <strong>Apartments Flora</strong> er blitt automatisk kansellert fordi depositumet ikke ble mottatt innen 24&nbsp;timer etter bestillingen.",
+    body2: "Datoene er n&aring; frigjort. Hvis du fortsatt &oslash;nsker &aring; bo hos oss, er du hjertelig velkommen til &aring; bestille p&aring; nytt.",
+    closing: "Takk for forst&aring;elsen.",
+    team: "Flora-teamet",
+    rebookCta: "Bestill igjen",
+    rebookUrl: "https://apartmentsflora.com/",
+  },
+};
+
+export function caparoCancelEmailSubject(guestName: string, lang: GuestLang = "en"): string {
+  const t = caparoCancelI18n[lang] || caparoCancelI18n.en;
+  return t.subject(guestName);
+}
+
+export function caparoCancelEmailHtml(guestName: string, lang: GuestLang = "en"): string {
+  const t = caparoCancelI18n[lang] || caparoCancelI18n.en;
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f1e2e;font-family:Georgia,'Times New Roman',serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0f1e2e;padding:40px 20px">
+<tr><td align="center">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+  <tr><td style="height:4px;background:linear-gradient(90deg,#C9A84C,#e8d48b,#C9A84C);border-radius:12px 12px 0 0"></td></tr>
+  <tr><td style="background:#122943;padding:36px 40px 28px;text-align:center;border-bottom:1px solid rgba(201,168,76,0.25)">
+    <p style="margin:0 0 6px;font-size:13px;letter-spacing:3px;text-transform:uppercase;color:#C9A84C">&#9670; Apartments Flora &#9670;</p>
+    <p style="margin:0;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,253,248,0.5)">Burgas &bull; Black Sea Coast</p>
+  </td></tr>
+  <tr><td style="background:#fffdf8;padding:44px 44px 28px">
+    <h1 style="margin:0 0 8px;font-size:24px;font-weight:700;color:#122943;text-align:center">${t.heading}</h1>
+    <div style="width:50px;height:2px;background:#C9A84C;margin:0 auto 28px"></div>
+    <p style="margin:0 0 18px;font-size:15px;line-height:1.8;color:#4a5e6e">${t.greeting(esc(guestName))}</p>
+    <p style="margin:0 0 18px;font-size:15px;line-height:1.8;color:#4a5e6e">${t.body1}</p>
+    <p style="margin:0 0 28px;font-size:15px;line-height:1.8;color:#4a5e6e">${t.body2}</p>
+    <div style="text-align:center;margin:0 0 28px">
+      <a href="${t.rebookUrl}" style="display:inline-block;background:#C9A84C;color:#122943;font-weight:700;padding:12px 28px;border-radius:8px;text-decoration:none;font-size:14px;letter-spacing:.03em">${t.rebookCta}</a>
+    </div>
+    <p style="margin:0;font-size:15px;line-height:1.8;color:#4a5e6e;text-align:center;font-style:italic">${t.closing}</p>
+  </td></tr>
+  <tr><td style="background:#122943;padding:28px 40px;text-align:center;border-top:1px solid rgba(201,168,76,0.25);border-radius:0 0 12px 12px">
+    <p style="margin:0;font-size:14px;font-weight:700;color:#C9A84C">${t.team}</p>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
 }
 
 /* ── helpers ──────────────────────────────────────────────────────────────── */

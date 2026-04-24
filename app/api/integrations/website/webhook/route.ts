@@ -28,6 +28,8 @@ const WebsiteInput = z.object({
   pricePerNight: z.union([z.string(), z.number()]).optional(),
   arrivalTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   notes: z.string().trim().max(2000).optional().nullable(),
+  // v1.2 B8: underground parking opt-in (€10/day).
+  parking: z.boolean().optional(),
   // When the upstream client already pushed to Beds24, it can pass the
   // canonical Beds24 booking id so we store externalRef="beds24-<id>"
   // from the start — then Beds24's inbound webhook updates the same row
@@ -162,6 +164,8 @@ export async function POST(req: Request) {
     pricePerNight,
     arrivalTime,
     departTime: "11:00",
+    // v1.2 B8: underground parking opt-in passed from Flora booking flow.
+    parking: parsed.data.parking === true,
   }, { onConflict: "externalRef" }).select().single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

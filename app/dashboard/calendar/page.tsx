@@ -63,7 +63,7 @@ function resStyle(r: { id: string; source: string }) {
   return { bg, bd, tx };
 }
 
-const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", cots:"0", arrivalTime:"14:00", departTime:"11:00", caparoReceived:false, caparoAmount:"" };
+const EMPTY_FORM = { guestName:"", phone:"", email:"", roomCode:"", startDate:"", endDate:"", source:"Телефон", notes:"", pricePerNight:80, guests:"2", children:"0", cots:"0", arrivalTime:"14:00", departTime:"11:00", caparoReceived:false, caparoAmount:"", parking:false };
 
 // ── main component ────────────────────────────────────────────────────────────
 export default function CalendarPage() {
@@ -112,6 +112,27 @@ export default function CalendarPage() {
     if (!form.startDate || !form.endDate) return 1;
     return Math.max(1, Math.round((parseD(form.endDate).getTime() - parseD(form.startDate).getTime()) / 86400000));
   }, [form.startDate, form.endDate]);
+
+  // v1.4 — Parking pool availability for the form's selected dates.
+  // null = "not yet known", number = "spots free for those dates".
+  // Re-fetches every time start/end change. Excludes the row being edited
+  // so re-saving an existing reservation with parking on doesn't double-count.
+  const [parkingFree, setParkingFree] = useState<number | null>(null);
+  useEffect(() => {
+    if (!form.startDate || !form.endDate || form.startDate >= form.endDate) {
+      setParkingFree(null);
+      return;
+    }
+    let cancelled = false;
+    const url = `/api/parking-availability?checkin=${encodeURIComponent(form.startDate)}` +
+                `&checkout=${encodeURIComponent(form.endDate)}` +
+                (editingRes?.id ? `&excludeId=${encodeURIComponent(editingRes.id)}` : "");
+    fetch(url)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!cancelled && j && Number.isFinite(j.free)) setParkingFree(j.free); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [form.startDate, form.endDate, editingRes?.id]);
 
   const load = useCallback(async () => {
     const [rRes, bRes] = await Promise.all([fetch("/api/rooms"), fetch("/api/reservations")]);
@@ -386,6 +407,7 @@ export default function CalendarPage() {
         departTime: editingRes.departTime || "11:00",
         caparoReceived: editingRes.caparoReceived === true,
         caparoAmount: editingRes.caparoAmount != null ? String(editingRes.caparoAmount) : "",
+        parking: editingRes.parking === true,
       });
     }
   }, [editingRes]);
@@ -698,6 +720,8 @@ export default function CalendarPage() {
       caparoReceived: form.caparoReceived === true,
       caparoAmount: form.caparoAmount !== "" && form.caparoAmount != null
         ? Number(form.caparoAmount) : null,
+      // v1.4 — Parking pool. Boolean coercion before send.
+      parking: form.parking === true,
     };
 
     let res;
@@ -1219,6 +1243,22 @@ export default function CalendarPage() {
                         style={{ flex:1, height:"30px", border:"1px solid #dedad4", borderRadius:"6px", padding:"0 9px", fontSize:"13px", background:"#fff", color:"#111", outline:"none" }} />
                     </div>
                   )}
+                </div>
+                {/* v1.4 — PARKING POOL. 5 spots shared across both buildings. The
+                    chip turns red and gets disabled when the pool is full for the
+                    selected dates. parkingFree is fetched whenever start/end change. */}
+                <div style={{ marginTop:"9px", background: parkingFree === 0 ? "#fff4f4" : (form.parking ? "#fff8ec" : "#faf9f7"), border:`1px solid ${parkingFree === 0 ? "#d44a4a" : (form.parking ? "#C9A84C" : "#dedad4")}`, borderRadius:"8px", padding:"10px 13px" }}>
+                  <label style={{ display:"flex", alignItems:"center", gap:"8px", cursor: parkingFree === 0 ? "not-allowed" : "pointer", opacity: parkingFree === 0 ? 0.7 : 1 }}>
+                    <input type="checkbox" checked={form.parking === true} disabled={parkingFree === 0}
+                      onChange={e => setForm((f:any) => ({...f, parking: e.target.checked}))} />
+                    <span style={{ fontSize:"12.5px", fontWeight:"700", color: parkingFree === 0 ? "#a11616" : (form.parking ? "#7a5300" : "#444"), letterSpacing:".02em" }}>
+                      {parkingFree === 0
+                        ? "🚗 Подземен паркинг — НЯМА свободни (5/5 заети)"
+                        : form.parking
+                          ? `🚗 ✓ Подземен паркинг (+€10/ден) · ${parkingFree}/5 свободни`
+                          : `🚗 Подземен паркинг (+€10/ден) · ${parkingFree == null ? "—" : parkingFree + "/5"} свободни`}
+                    </span>
+                  </label>
                 </div>
                 <div style={{ background:"#f5f3ff", border:"1px solid #ddd3fe", borderRadius:"8px", padding:"9px 13px", marginTop:"9px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                   <div style={{ fontSize:"12px", color:"#6c63ff" }}>

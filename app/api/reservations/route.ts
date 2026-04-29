@@ -32,6 +32,8 @@ const ReservationInput = z.object({
   // amount as part of the create flow.
   caparoReceived: z.boolean().optional(),
   caparoAmount: z.union([z.string(), z.number()]).optional().nullable(),
+  // v1.4 — Parking (5-spot pool, shared across both buildings).
+  parking: z.boolean().optional(),
 });
 
 function toIsoOrNull(v: string): string | null {
@@ -126,6 +128,7 @@ export async function POST(req: Request) {
     caparoAmount: parsed.data.caparoAmount != null && parsed.data.caparoAmount !== ""
       ? Number(parsed.data.caparoAmount) : null,
     caparoReceivedAt: parsed.data.caparoReceived === true ? new Date().toISOString() : null,
+    parking: parsed.data.parking === true,
   }).select().single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

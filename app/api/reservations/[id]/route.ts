@@ -29,6 +29,8 @@ const PatchInput = z.object({
   // v1.2 — Caparo (deposit) tracking.
   caparoReceived: z.boolean().optional(),
   caparoAmount: z.any().optional(),
+  // v1.4 — Parking pool toggle.
+  parking: z.boolean().optional(),
 }).strip();
 
 function normalizeDate(v: string | undefined): string | null | undefined {

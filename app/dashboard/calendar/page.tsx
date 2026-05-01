@@ -89,8 +89,8 @@ export default function CalendarPage() {
   const [detailRes, setDetailRes] = useState<any>(null); // for viewing full details
   const [todayFullScreen, setTodayFullScreen] = useState<"res"|"co"|"arr"|"caparo"|null>(null);
   const [justSaved, setJustSaved] = useState(false); // flash "saved" banner after creation
-  const [msgSending, setMsgSending] = useState<"welcome"|"farewell"|null>(null);
-  const [msgPreview, setMsgPreview] = useState<{type:"welcome"|"farewell", resId:string, emailHtml:string, emailSubject:string, waText:string, phone:string, email:string}|null>(null);
+  const [msgSending, setMsgSending] = useState<"welcome"|"farewell"|"caparo"|null>(null);
+  const [msgPreview, setMsgPreview] = useState<{type:"welcome"|"farewell"|"caparo", resId:string, emailHtml:string, emailSubject:string, waText:string, phone:string, email:string}|null>(null);
   const [editableWaText, setEditableWaText] = useState("");
   const [editableEmailHtml, setEditableEmailHtml] = useState("");
   const [editableEmailSubject, setEditableEmailSubject] = useState("");
@@ -785,7 +785,7 @@ export default function CalendarPage() {
   }
 
   // ── open message preview modal ──────────────────────────────────────────
-  async function openMsgPreview(resId: string, type: "welcome" | "farewell") {
+  async function openMsgPreview(resId: string, type: "welcome" | "farewell" | "caparo") {
     setMsgSending(type);
     try {
       const resp = await fetch("/api/messages/preview", {
@@ -1320,6 +1320,18 @@ export default function CalendarPage() {
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                         {msgSending === "farewell" ? "Зареждане..." : "Сбогуване"}
                       </button>
+                      {/* v1.4 — Manual caparo reminder. Renders only for direct/website
+                          bookings whose caparo has NOT yet been received. */}
+                      {!editingRes.caparoReceived && ["Уебсайт","Директна","Direct","Телефон"].includes(editingRes.source) && (
+                        <button
+                          disabled={msgSending === "caparo"}
+                          onClick={() => openMsgPreview(editingRes.id, "caparo")}
+                          style={{ background:"#fff8ec", color:"#92400e", border:"1px solid #fbbf24", borderRadius:"8px", padding:"8px 14px", fontSize:"12px", fontWeight:"600", cursor: msgSending === "caparo" ? "wait" : "pointer", opacity: msgSending === "caparo" ? .6 : 1, display:"flex", alignItems:"center", gap:"6px" }}
+                          title="Изпрати приятелско напомняне за капаро">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                          {msgSending === "caparo" ? "Зареждане..." : "Капаро напомняне"}
+                        </button>
+                      )}
                     </div>
                     {/* Sent status indicators */}
                     <div style={{ display:"flex", gap:"12px", marginTop:"8px", fontSize:"11px", color:"#6b7280" }}>
@@ -1436,9 +1448,15 @@ export default function CalendarPage() {
               (() => {
                 // v1.2 — Pending caparo = confirmed reservations where
                 // caparoReceived is still false. Sorted oldest-first so
-                // the most overdue ones surface at the top.
+                // the most overdue ones surface at the top. OTA bookings
+                // (Booking/Airbnb/etc.) are excluded — those have their
+                // own deposit policies and we don't chase them.
+                const CAPARO_SOURCES = ["Уебсайт", "Директна", "Direct", "Телефон"];
                 const pending = reservations
-                  .filter((r: any) => r.status === "CONFIRMED" && r.caparoReceived !== true)
+                  .filter((r: any) =>
+                    r.status === "CONFIRMED"
+                    && r.caparoReceived !== true
+                    && CAPARO_SOURCES.includes(r.source))
                   .sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
                 if (pending.length === 0) {
                   return <div style={{ color:"#bbb", padding:"24px", textAlign:"center" }}>Няма чакащи капара 🎉</div>;

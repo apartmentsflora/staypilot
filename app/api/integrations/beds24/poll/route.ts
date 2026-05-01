@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
+import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice, sourceForUpdate } from "@/lib/beds24";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
 import { notify } from "@/lib/notify";
 
@@ -113,7 +113,7 @@ export async function GET() {
       // IMPORTANT: check for error too — if SELECT fails, treat as "skip"
       // rather than creating duplicate notifications.
       const { data: existing, error: selectErr } = await supabaseAdmin
-        .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
+        .from("Reservation").select("id, status, source").eq("externalRef", externalRef).maybeSingle();
 
       if (selectErr) {
         console.error(`[beds24-poll] SELECT failed for ${externalRef}:`, selectErr.message);
@@ -146,7 +146,7 @@ export async function GET() {
       const nights = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000));
       const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
 
-      const row = {
+      const row: Record<string, any> = {
         guestName, phone, email,
         roomCode, roomId: room.id,
         startDate: start.toISOString(),
@@ -161,6 +161,11 @@ export async function GET() {
       };
 
       if (existing) {
+        // v1.4 — preserve trusted source (e.g. "Уебсайт") instead of
+        // letting Beds24's referer="API" downgrade it to "Директна".
+        const safeSource = sourceForUpdate((existing as any).source, detectedSource);
+        if (safeSource == null) delete row.source;
+        else row.source = safeSource;
         await supabaseAdmin.from("Reservation").update(row).eq("id", existing.id);
         updated++;
       } else {

@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import { BEDS24_MAP, loadBeds24Map, getRoomColor } from "@/lib/rooms";
-import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice } from "@/lib/beds24";
+import { fetchBeds24Bookings, detectBookingSource, extractBookingPrice, sourceForUpdate } from "@/lib/beds24";
 import { notify } from "@/lib/notify";
 
 // Bootstrap / reconcile endpoint.
@@ -97,7 +97,7 @@ export async function POST(req: Request) {
     const isCancelled = b.status === "cancelled" || b.status === "black";
 
     const { data: existing } = await supabaseAdmin
-      .from("Reservation").select("id, status").eq("externalRef", externalRef).maybeSingle();
+      .from("Reservation").select("id, status, source").eq("externalRef", externalRef).maybeSingle();
 
     if (isCancelled) {
       if (existing && existing.status !== "CANCELLED") {
@@ -119,7 +119,9 @@ export async function POST(req: Request) {
     const pricePerNight = totalPrice ? Math.round(totalPrice / nights * 100) / 100 : null;
 
     if (existing) {
-      const { error: updErr } = await supabaseAdmin.from("Reservation").update({
+      // v1.4 — same source-preservation guard as poll + webhook (see lib/beds24.ts).
+      const safeSource = sourceForUpdate((existing as any).source, detectedSource);
+      const updateRow: Record<string, any> = {
         guestName: guestName.trim() || "Beds24 гост",
         phone: phone || "",
         email: email || null,
@@ -131,9 +133,10 @@ export async function POST(req: Request) {
         notes: b.notes || null,
         guests: numAdult,
         children: numChild,
-        source: detectedSource,
         ...(pricePerNight != null ? { pricePerNight } : {}),
-      }).eq("id", existing.id);
+      };
+      if (safeSource != null) updateRow.source = safeSource;
+      const { error: updErr } = await supabaseAdmin.from("Reservation").update(updateRow).eq("id", existing.id);
       if (updErr) { console.error(`[beds24 import] update failed for ${externalRef}:`, updErr.message); skipped++; }
       else updated++;
     } else {

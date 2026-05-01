@@ -123,19 +123,40 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
 
   // Outbound Beds24 push — only for reservations that originated from Beds24.
   if (data.externalRef && String(data.externalRef).startsWith("beds24-")) {
-    try {
-      await updateBeds24Booking({
-        externalRef: data.externalRef,
-        guestName: update.guestName,
-        phone: update.phone,
-        email: update.email,
-        startDate: update.startDate,
-        endDate: update.endDate,
-        notes: update.notes,
-        status: update.status,
-      });
-    } catch (e) {
-      console.error("[reservations PATCH] beds24 push threw", e);
+    if (update.status === "CANCELLED") {
+      // OTA allowlist (Booking/Airbnb/etc.): cancellation must reach Beds24
+      // as status=cancelled so the channel receives the cancellation signal.
+      // Anything NOT on this list (Уебсайт/Директна/Телефон/null/legacy
+      // "Beds24" default) is safe to hard-delete — that path avoids the
+      // gray-bar accumulation on the Beds24 calendar UI.
+      const OTA_SOURCES = ["Booking", "Airbnb", "Expedia", "VRBO", "Agoda", "Hotels.com", "Trivago", "Hostelworld", "Trip.com"];
+      const isOTA = OTA_SOURCES.includes(data.source);
+      const isDirect = !isOTA;
+      if (isDirect) {
+        try { await cancelBeds24Booking(data.externalRef); }
+        catch (e) { console.error("[reservations PATCH] beds24 cancel threw", e); }
+      } else {
+        try {
+          await updateBeds24Booking({ externalRef: data.externalRef, status: "CANCELLED" });
+        } catch (e) {
+          console.error("[reservations PATCH] beds24 OTA cancel threw", e);
+        }
+      }
+    } else {
+      try {
+        await updateBeds24Booking({
+          externalRef: data.externalRef,
+          guestName: update.guestName,
+          phone: update.phone,
+          email: update.email,
+          startDate: update.startDate,
+          endDate: update.endDate,
+          notes: update.notes,
+          status: update.status,
+        });
+      } catch (e) {
+        console.error("[reservations PATCH] beds24 push threw", e);
+      }
     }
   }
 
@@ -146,16 +167,26 @@ export async function DELETE(_req: Request, { params }: { params: { id: string }
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Look up externalRef before deleting so we can still cancel on Beds24.
+  // Look up externalRef + source before deleting so we can still notify Beds24.
   const { data: existing } = await supabaseAdmin
-    .from("Reservation").select("externalRef").eq("id", params.id).maybeSingle();
+    .from("Reservation").select("externalRef, source").eq("id", params.id).maybeSingle();
 
   const { error } = await supabaseAdmin.from("Reservation").delete().eq("id", params.id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   if (existing?.externalRef) {
-    try { await cancelBeds24Booking(existing.externalRef); }
-    catch (e) { console.error("[reservations DELETE] beds24 cancel threw", e); }
+    // Same source-aware branching as PATCH cancel: DELETE on Beds24 for
+    // direct bookings only; status=cancelled for OTA so the channel gets
+    // notified. OTA allowlist (everything else falls through to direct).
+    const OTA_SOURCES = ["Booking", "Airbnb", "Expedia", "VRBO", "Agoda", "Hotels.com", "Trivago", "Hostelworld", "Trip.com"];
+    const isDirect = !OTA_SOURCES.includes(existing.source);
+    if (isDirect) {
+      try { await cancelBeds24Booking(existing.externalRef); }
+      catch (e) { console.error("[reservations DELETE] beds24 cancel threw", e); }
+    } else {
+      try { await updateBeds24Booking({ externalRef: existing.externalRef, status: "CANCELLED" }); }
+      catch (e) { console.error("[reservations DELETE] beds24 OTA cancel threw", e); }
+    }
   }
   return NextResponse.json({ ok: true });
 }

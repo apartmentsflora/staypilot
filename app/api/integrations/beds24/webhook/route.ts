@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { loadBeds24Map, getRoomColor } from "@/lib/rooms";
-import { detectBookingSource, extractBookingPrice } from "@/lib/beds24";
+import { detectBookingSource, extractBookingPrice, sourceForUpdate } from "@/lib/beds24";
 import { notify as notifyPush } from "@/lib/notify";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -525,7 +525,7 @@ async function upsertReservation(input: {
 }): Promise<{ action: "inserted" | "updated" | "cancelled" | "skipped" }> {
   const { data: existing } = await supabaseAdmin
     .from("Reservation")
-    .select('id, status, "createdAt"')
+    .select('id, status, "createdAt", source')
     .eq("externalRef", input.externalRef)
     .maybeSingle();
 
@@ -558,7 +558,7 @@ async function upsertReservation(input: {
   }
 
   // ── Shared row data for insert/update ──
-  const row = {
+  const row: Record<string, any> = {
     guestName: input.guestName,
     phone: input.phone,
     email: input.email,
@@ -577,6 +577,13 @@ async function upsertReservation(input: {
 
   // ── Case 2: Update existing ──
   if (existing) {
+    // Source-preservation guard (see lib/beds24.ts: sourceForUpdate).
+    // Beds24's own webhook fires ~10s AFTER Flora's website webhook;
+    // its referer field is "API" so detectBookingSource falls back to
+    // "Директна" — which would otherwise overwrite a "Уебсайт" label.
+    const safeSource = sourceForUpdate(existing.source, input.source || "Beds24");
+    if (safeSource == null) delete row.source;
+    else row.source = safeSource;
     const { error: updateErr } = await supabaseAdmin
       .from("Reservation")
       .update(row)

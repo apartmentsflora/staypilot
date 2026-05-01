@@ -284,10 +284,15 @@ export function DashboardShell({ children, stats, onNewRes, onTodayRes, onTodayA
 
             {/* v1.2 — Pending caparo tab. Badge shows the count of confirmed
                 reservations with no caparo received. Hidden when count is 0
-                so it doesn't pull attention when there's nothing to chase. */}
+                so it doesn't pull attention when there's nothing to chase.
+                OTA bookings (Booking/Airbnb/etc.) are excluded — those have
+                their own deposit policies and we don't chase them. */}
             {(() => {
+              const CAPARO_SOURCES = ["Уебсайт", "Директна", "Direct", "Телефон"];
               const pendingCount = reservations.filter((r: any) =>
-                r.status === "CONFIRMED" && r.caparoReceived !== true
+                r.status === "CONFIRMED"
+                && r.caparoReceived !== true
+                && CAPARO_SOURCES.includes(r.source)
               ).length;
               return (
                 <button onClick={onPendingCaparo || (() => {})}

@@ -10,6 +10,8 @@ import {
   farewellEmailSubject,
   welcomeWhatsAppText,
   farewellWhatsAppText,
+  caparoReminderEmailHtml,
+  caparoReminderEmailSubject,
   type TemplateData,
   type GuestLang,
 } from "@/lib/email-templates";
@@ -36,7 +38,7 @@ export async function POST(req: Request) {
   }
 
   const { reservationId, type } = body;
-  if (!reservationId || !type || !["welcome", "farewell"].includes(type)) {
+  if (!reservationId || !type || !["welcome", "farewell", "caparo"].includes(type)) {
     return NextResponse.json({ error: "Missing reservationId or invalid type" }, { status: 400 });
   }
 
@@ -75,11 +77,23 @@ export async function POST(req: Request) {
     lang,
   };
 
-  const emailHtml = type === "farewell" ? farewellEmailHtml(td) : welcomeEmailHtml(td);
-  const emailSubject = type === "farewell"
-    ? farewellEmailSubject(td.guestName, lang)
-    : welcomeEmailSubject(td.guestName, lang);
-  const waText = type === "farewell" ? farewellWhatsAppText(td) : welcomeWhatsAppText(td);
+  let emailHtml: string, emailSubject: string, waText: string;
+  if (type === "farewell") {
+    emailHtml = farewellEmailHtml(td);
+    emailSubject = farewellEmailSubject(td.guestName, lang);
+    waText = farewellWhatsAppText(td);
+  } else if (type === "caparo") {
+    // v1.4 — caparo reminder. Single-purpose deposit-only email.
+    // No WhatsApp variant — staff can send the bank details via WhatsApp
+    // freehand if they want.
+    emailHtml = caparoReminderEmailHtml(td);
+    emailSubject = caparoReminderEmailSubject(td.guestName, lang);
+    waText = "";
+  } else {
+    emailHtml = welcomeEmailHtml(td);
+    emailSubject = welcomeEmailSubject(td.guestName, lang);
+    waText = welcomeWhatsAppText(td);
+  }
 
   return NextResponse.json({ emailHtml, emailSubject, waText, phone: res.phone || "", email: res.email || "" });
 }

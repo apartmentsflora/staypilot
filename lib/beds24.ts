@@ -294,10 +294,55 @@ export async function updateBeds24Booking(input: {
 }
 
 /**
- * Cancel a Beds24 booking. Convenience wrapper.
+ * Cancel a Beds24 booking by hard-deleting it.
+ *
+ * v2 API supports DELETE /bookings?id=N which removes the booking entirely
+ * (no gray bar / cancelled record left on the calendar). We prefer this over
+ * status=cancelled because cancelled bookings clutter the Beds24 UI even
+ * though they don't hold inventory.
+ *
+ * externalRef must be of the form "beds24-<id>" (set when the inbound webhook
+ * imported the booking, or when createBeds24Booking returned the new id).
  */
 export async function cancelBeds24Booking(externalRef?: string | null): Promise<PushResult> {
-  return updateBeds24Booking({ externalRef, status: "CANCELLED" });
+  const id = externalRef?.startsWith("beds24-") ? Number(externalRef.slice(7)) : NaN;
+  if (!Number.isFinite(id) || id <= 0) {
+    return { ok: false, reason: "no Beds24 id on externalRef" };
+  }
+  const token = await getAccessToken();
+  if (!token) return { ok: false, reason: "no Beds24 access token" };
+
+  try {
+    const r = await fetch(`${BEDS24_BASE}/bookings?id=${id}`, {
+      method: "DELETE",
+      headers: { token, accept: "application/json" },
+    });
+    const text = await r.text();
+    let parsed: any = null;
+    try { parsed = JSON.parse(text); } catch { /* non-JSON */ }
+    if (!r.ok) {
+      await logSync("ERROR", { step: "delete", httpStatus: r.status, body: parsed ?? text });
+      return { ok: false, reason: `Beds24 delete failed (HTTP ${r.status})` };
+    }
+    const first = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (first?.success === false) {
+      // Beds24 returns 200 with success:false (+ errors[]) for "booking
+      // not found" — treat that as idempotent success (we wanted it gone,
+      // it's already gone). Any other error message is a real failure.
+      const errMsg = String(first?.errors?.[0]?.message || "").toLowerCase();
+      if (errMsg.includes("not found") || errMsg.includes("does not exist")) {
+        await logSync("PROCESSED", { step: "delete", bookingId: id, note: "already-gone" });
+        return { ok: true, bookingId: id };
+      }
+      await logSync("ERROR", { step: "delete", beds24Response: first });
+      return { ok: false, reason: "Beds24 rejected delete" };
+    }
+    await logSync("PROCESSED", { step: "delete", bookingId: id });
+    return { ok: true, bookingId: id };
+  } catch (e: any) {
+    await logSync("ERROR", { step: "delete", error: String(e?.message || e) });
+    return { ok: false, reason: String(e?.message || e) };
+  }
 }
 
 /**
@@ -389,6 +434,49 @@ export function detectBookingSource(b: any): string {
 
   // Default: came through Beds24 but channel unknown
   return "Beds24";
+}
+
+/**
+ * v1.4 — Source-preservation guard for Beds24 ingestion.
+ *
+ * Why: Beds24 stores referer="API" for every booking we push from Flora's
+ * website (it discards our "Direct website booking" string), so when its
+ * inbound webhook / poll / import re-syncs the same booking, detectBookingSource
+ * falls through to "Директна". If we blindly write that on update, we
+ * downgrade authoritative external sources ("Уебсайт", "Booking", "Airbnb"…)
+ * back to "Директна" — which is what the user reported.
+ *
+ * Use: when updating an existing Reservation, fetch its current source and
+ * pass it through this helper. The result tells you whether to include the
+ * `source` field in the update payload.
+ *
+ *   const newSource = sourceForUpdate(existing.source, detectBookingSource(b));
+ *   if (newSource != null) row.source = newSource;
+ *
+ * Returns:
+ *   • null  → keep the existing source (don't write source at all)
+ *   • string → safe to write this source
+ */
+const TRUSTED_EXISTING_SOURCES = new Set([
+  // External / OTA labels — Beds24 echo of an OTA booking should NEVER
+  // downgrade these (and even if detection is consistent, locking them
+  // protects against future regression).
+  "Уебсайт", "Booking", "Airbnb", "Expedia", "VRBO", "Agoda", "Hotels.com", "Trivago",
+  // Internal labels — when an operator creates a booking in StayPilot with
+  // source="Телефон" / "Direct", the Beds24 echo arrives with referer="StayPilot"
+  // which detectBookingSource maps to "Директна". Without these guards the
+  // operator-set label gets clobbered by the echo. "Директна" itself is
+  // included so detectBookingSource's no-op write is suppressed (saves a
+  // pointless update that bumps updatedAt for no reason).
+  "Телефон", "Direct", "Директна",
+]);
+export function sourceForUpdate(existingSource: string | null | undefined, detected: string): string | null {
+  if (existingSource && TRUSTED_EXISTING_SOURCES.has(existingSource)) {
+    // The row already has a stronger source label than anything Beds24 can
+    // tell us. Skip writing source to preserve it.
+    return null;
+  }
+  return detected;
 }
 
 /**

@@ -41,9 +41,14 @@ function getGmailCreds(): { user: string; pass: string } | null {
   return { user, pass };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  // Auth: admin session OR Bearer ${CRON_SECRET} (for Netlify Scheduled
+  // Functions / pg_cron / external schedulers).
   const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const cronSecret = process.env.CRON_SECRET || "";
+  const authHeader = req.headers.get("authorization") || "";
+  const isCronCall = !!cronSecret && authHeader === `Bearer ${cronSecret}`;
+  if (!session && !isCronCall) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cutoffIso = new Date(Date.now() - AUTO_CANCEL_HOURS * 3600_000).toISOString();
 
@@ -74,12 +79,22 @@ export async function GET() {
   for (const r of rows || []) {
     try {
       // 1. Flip status in DB (single authoritative write).
-      const { error: updErr } = await supabaseAdmin
+      // Idempotency: WHERE status='CONFIRMED' makes a concurrent second
+      // worker match 0 rows. We .select() the result and skip side-effects
+      // when no row was actually flipped — without this, both workers send
+      // a duplicate cancellation email + duplicate staff alert.
+      const { data: claimed, error: updErr } = await supabaseAdmin
         .from("Reservation")
         .update({ status: "CANCELLED", cancelledAt: new Date().toISOString() })
         .eq("id", r.id)
-        .eq("status", "CONFIRMED"); // idempotency guard — skip if another worker flipped it first
+        .eq("status", "CONFIRMED")
+        .select("id");
       if (updErr) { failures.push({ id: r.id, error: updErr.message }); continue; }
+      if (!claimed || claimed.length === 0) {
+        // Another worker already cancelled this row in the gap between
+        // our SELECT and UPDATE. Skip — they'll handle the side-effects.
+        continue;
+      }
 
       // 2. Push cancel to Beds24 (best-effort).
       if (r.externalRef) {

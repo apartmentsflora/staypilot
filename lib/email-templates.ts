@@ -857,6 +857,143 @@ export function welcomeEmailSubject(guestName: string, lang: GuestLang = "en"): 
   return t.subject(guestName);
 }
 
+/* ── Caparo (deposit) reminder — focused single-purpose email ────────────── */
+//
+// Sent manually from StayPilot when staff want to nudge a guest whose
+// 24-hour deposit window is approaching or has passed without payment.
+// Strips out the welcome niceties (no full reservation details card,
+// no self-check-in instructions, no EV/parking) and shows ONLY:
+//   • A friendly headline + deposit-overdue body
+//   • The bank-transfer card (recipient, IBAN, amount, payment reference)
+//   • The "must be received in 24h or voided" warning
+//
+// Reuses existing welcomeI18n.depositXxx strings — all 7 languages already
+// done, no duplication. Subject line is a separate i18n table below.
+const caparoReminderSubjectI18n: Record<GuestLang, (n: string) => string> = {
+  en: (n) => `Reminder · Deposit pending · Apartments Flora`,
+  bg: (n) => `Напомняне · Капаро в очакване · Apartments Flora`,
+  de: (n) => `Erinnerung · Anzahlung ausstehend · Apartments Flora`,
+  fr: (n) => `Rappel · Acompte en attente · Apartments Flora`,
+  ru: (n) => `Напоминание · Задаток ожидается · Apartments Flora`,
+  uk: (n) => `Нагадування · Завдаток очікується · Apartments Flora`,
+  no: (n) => `Påminnelse · Depositum venter · Apartments Flora`,
+};
+
+const caparoReminderHeadlineI18n: Record<GuestLang, string> = {
+  en: "Friendly reminder about your deposit",
+  bg: "Приятелско напомняне за капарото",
+  de: "Freundliche Erinnerung an Ihre Anzahlung",
+  fr: "Rappel amical concernant votre acompte",
+  ru: "Дружеское напоминание о вашем задатке",
+  uk: "Дружнє нагадування про ваш завдаток",
+  no: "Vennlig påminnelse om ditt depositum",
+};
+
+const caparoReminderIntroI18n: Record<GuestLang, (n: string) => string> = {
+  en: (n) => `Dear ${n}, this is a friendly reminder that the deposit for your reservation has not yet reached our bank account. To keep your booking, please complete the transfer using the details below.`,
+  bg: (n) => `Уважаеми ${n}, напомняме Ви, че капарото за Вашата резервация все още не е постъпило по банковата ни сметка. За да запазим резервацията Ви, моля направете превода с данните по-долу.`,
+  de: (n) => `Lieber ${n}, dies ist eine freundliche Erinnerung, dass die Anzahlung für Ihre Reservierung noch nicht bei uns eingegangen ist. Damit Ihre Buchung bestehen bleibt, überweisen Sie bitte den Betrag mit den unten angegebenen Daten.`,
+  fr: (n) => `Cher ${n}, ceci est un rappel amical : l'acompte pour votre réservation n'est pas encore arrivé sur notre compte bancaire. Pour conserver votre réservation, veuillez effectuer le virement avec les coordonnées ci-dessous.`,
+  ru: (n) => `Уважаемый ${n}, дружеское напоминание: задаток за ваше бронирование ещё не поступил на наш банковский счёт. Чтобы сохранить бронирование, пожалуйста, выполните перевод по данным ниже.`,
+  uk: (n) => `Шановний ${n}, дружнє нагадування: завдаток за ваше бронювання ще не надійшов на наш банківський рахунок. Щоб зберегти бронювання, будь ласка, виконайте переказ за реквізитами нижче.`,
+  no: (n) => `Kjære ${n}, dette er en vennlig påminnelse om at depositumet for reservasjonen din ennå ikke er mottatt på vår bankkonto. For å beholde bookingen din, vennligst gjennomfør overføringen med detaljene nedenfor.`,
+};
+
+export function caparoReminderEmailSubject(guestName: string, lang: GuestLang = "en"): string {
+  const fn = caparoReminderSubjectI18n[lang] || caparoReminderSubjectI18n.en;
+  return fn(guestName);
+}
+
+export function caparoReminderEmailHtml(d: TemplateData): string {
+  const lang = d.lang || "en";
+  const t = welcomeI18n[lang] || welcomeI18n.en;
+  const headline = caparoReminderHeadlineI18n[lang] || caparoReminderHeadlineI18n.en;
+  const introFn  = caparoReminderIntroI18n[lang] || caparoReminderIntroI18n.en;
+
+  const totalNum = parseFloat(d.total.replace(/[^0-9.]/g, "")) || 0;
+  const depositAmt = Math.ceil(totalNum / 2);
+  const depositRef = t.depositRef(d.roomCode, d.checkin, d.checkout);
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f1e2e;font-family:Georgia,'Times New Roman',serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0f1e2e;padding:40px 20px">
+<tr><td align="center">
+
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+
+  <!-- Gold top accent -->
+  <tr><td style="height:4px;background:linear-gradient(90deg,#C9A84C,#e8d48b,#C9A84C);border-radius:12px 12px 0 0"></td></tr>
+
+  <!-- Header -->
+  <tr><td style="background:#122943;padding:36px 40px 28px;text-align:center;border-bottom:1px solid rgba(201,168,76,0.25)">
+    <p style="margin:0 0 6px;font-size:13px;letter-spacing:3px;text-transform:uppercase;color:#C9A84C;font-family:Georgia,serif">&#9670; Apartments Flora &#9670;</p>
+    <p style="margin:0;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,253,248,0.5);font-family:Georgia,serif">Burgas &bull; Black Sea Coast</p>
+  </td></tr>
+
+  <!-- Body -->
+  <tr><td style="background:#fffdf8;padding:44px 44px 20px">
+
+    <h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#122943;font-family:Georgia,serif;text-align:center">${headline}</h1>
+    <div style="width:50px;height:2px;background:#C9A84C;margin:0 auto 28px"></div>
+
+    <p style="margin:0 0 22px;font-size:15px;line-height:1.8;color:#4a5e6e;text-align:center;font-family:Georgia,serif">${introFn(esc(d.guestName))}</p>
+
+    <!-- Booking ref strip -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f7f4ed;border-radius:10px;border:1px solid rgba(201,168,76,0.2);margin:0 0 24px">
+      <tr><td style="padding:14px 22px;text-align:center">
+        <p style="margin:0;font-size:12px;color:#8a9aab;text-transform:uppercase;letter-spacing:1.5px;font-family:Georgia,serif">${t.depositRefLabel}</p>
+        <p style="margin:6px 0 0;font-size:15px;font-weight:700;color:#122943;font-family:Georgia,serif">${esc(depositRef)}</p>
+      </td></tr>
+    </table>
+
+    <!-- ──────────── DEPOSIT (importance banner) ──────────── -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px">
+      <tr><td style="background:#0f1e2e;border-radius:10px;border:1px solid #C9A84C;padding:24px 28px">
+        <p style="margin:0 0 8px;font-size:11px;letter-spacing:3px;text-transform:uppercase;color:#C9A84C;text-align:center;font-family:Georgia,serif">&#9670; ${t.depositImportant} &#9670;</p>
+        <p style="margin:0 0 14px;font-size:16px;color:#fffdf8;text-align:center;font-family:Georgia,serif;line-height:1.6">${t.depositMsg(String(depositAmt))}</p>
+        <p style="margin:0;font-size:13px;line-height:1.7;color:rgba(255,253,248,0.65);font-family:Georgia,serif">${t.depositWithin}</p>
+      </td></tr>
+    </table>
+
+    <!-- ──────────── BANK TRANSFER CARD ──────────── -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f7f4ed;border-radius:10px;border:1px solid rgba(201,168,76,0.2);margin:0 0 22px">
+      <tr><td style="padding:24px 28px">
+        <p style="margin:0 0 18px;font-size:12px;letter-spacing:2.5px;text-transform:uppercase;color:#C9A84C;text-align:center;font-family:Georgia,serif">${t.depositBankTitle}</p>
+
+        <p style="margin:0 0 4px;font-size:11px;color:#8a9aab;text-transform:uppercase;letter-spacing:1.5px;font-family:Georgia,serif">${t.depositRecipientLabel}</p>
+        <p style="margin:0 0 16px;font-size:15px;font-weight:600;color:#122943;font-family:Georgia,serif">${t.depositRecipient}</p>
+
+        <p style="margin:0 0 4px;font-size:11px;color:#8a9aab;text-transform:uppercase;letter-spacing:1.5px;font-family:Georgia,serif">${t.depositIbanLabel}</p>
+        <p style="margin:0 0 16px;font-size:14px;font-weight:600;color:#122943;font-family:'Courier New',monospace;letter-spacing:1px">BG47STSA93000010588249</p>
+
+        <p style="margin:0 0 4px;font-size:11px;color:#8a9aab;text-transform:uppercase;letter-spacing:1.5px;font-family:Georgia,serif">${t.depositAmountLabel}</p>
+        <p style="margin:0 0 4px;font-size:24px;font-weight:700;color:#C9A84C;font-family:Georgia,serif">&euro;${depositAmt}</p>
+        <p style="margin:0 0 16px;font-size:11px;color:#8a9aab;font-family:Georgia,serif">${t.depositAmountFrom(esc(d.total.replace(/[^0-9.]/g, "")))}</p>
+
+        <p style="margin:0 0 4px;font-size:11px;color:#8a9aab;text-transform:uppercase;letter-spacing:1.5px;font-family:Georgia,serif">${t.depositRefLabel}</p>
+        <p style="margin:0;font-size:13px;font-weight:600;color:#122943;font-family:'Courier New',monospace;background:#fff;padding:8px 12px;border-radius:6px;border:1px dashed rgba(201,168,76,0.4)">${esc(depositRef)}</p>
+      </td></tr>
+    </table>
+
+    <!-- Closing -->
+    <p style="margin:18px 0 8px;font-size:14px;line-height:1.7;color:#4a5e6e;text-align:center;font-family:Georgia,serif;font-style:italic">${t.closing}</p>
+
+  </td></tr>
+
+  <!-- Footer -->
+  <tr><td style="background:#122943;padding:24px 40px;text-align:center;border-top:1px solid rgba(201,168,76,0.25);border-radius:0 0 12px 12px">
+    <p style="margin:0;font-size:11px;letter-spacing:1.5px;color:rgba(255,253,248,0.5);font-family:Georgia,serif">Apartments Flora &bull; Burgas, Bulgaria</p>
+    <p style="margin:6px 0 0;font-size:11px;color:rgba(255,253,248,0.4);font-family:Georgia,serif">studioflora2017@gmail.com &bull; +359 886 512 205</p>
+  </td></tr>
+
+</table>
+
+</td></tr>
+</table>
+</body></html>`;
+}
+
 /* ── Farewell (departure + Google review) ────────────────────────────────── */
 export function farewellEmailHtml(d: TemplateData): string {
   const lang = d.lang || "en";

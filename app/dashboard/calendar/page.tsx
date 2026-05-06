@@ -96,6 +96,14 @@ export default function CalendarPage() {
   const [editableEmailSubject, setEditableEmailSubject] = useState("");
   const [emailEditMode, setEmailEditMode] = useState(false);
   const [previewTab, setPreviewTab] = useState<"email"|"whatsapp">("email");
+  // v1.7.1 — Stable srcDoc for the visual editor iframe. CRITICAL: this is
+  // ONLY updated when we explicitly want the iframe to re-render (modal
+  // opens with a new email, or user toggles back from HTML mode). It must
+  // NOT be tied to editableEmailHtml — every keystroke would otherwise
+  // remount the iframe and bounce the cursor / scroll position.
+  const [iframeSrcDoc, setIframeSrcDoc] = useState("");
+  // Ref to the iframe so we can read live HTML at send time (no live state sync).
+  const emailIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastFetchRef = useRef<string>("");
   const [syncing, setSyncing] = useState(false);
   const [autoSync, setAutoSync] = useState(() => {
@@ -803,6 +811,11 @@ export default function CalendarPage() {
       setEditableWaText(data.waText);
       setEditableEmailHtml(data.emailHtml);
       setEditableEmailSubject(data.emailSubject);
+      // v1.7.1 — iframeSrcDoc is the STABLE source for the visual editor.
+      // We set it here (and only here / on HTML→Visual toggle) so that
+      // typing inside the iframe doesn't trigger a re-render that would
+      // bounce the scroll to the top and lose the cursor.
+      setIframeSrcDoc(data.emailHtml);
       setEmailEditMode(false);
       setPreviewTab("email");
     } catch (e: any) {
@@ -814,6 +827,23 @@ export default function CalendarPage() {
   // ── send email from preview modal ─────────────────────────────────────────
   async function sendEmailFromPreview() {
     if (!msgPreview) return;
+    // v1.7.1 — Pick the right HTML to send based on edit mode.
+    //   • HTML mode: textarea is the source of truth → editableEmailHtml.
+    //   • Visual mode: read live from the iframe DOM (the user's edits live
+    //     inside contentDocument; we don't sync them to React state on every
+    //     keystroke, so this is the only place they're surfaced).
+    let htmlToSend = editableEmailHtml;
+    if (!emailEditMode) {
+      try {
+        const doc = emailIframeRef.current?.contentDocument;
+        if (doc?.documentElement) {
+          htmlToSend = "<!DOCTYPE html>" + doc.documentElement.outerHTML;
+        }
+      } catch (_) { /* fall back to editableEmailHtml */ }
+    }
+    // Did the user actually edit anything? Send the original template if not.
+    const userEdited = htmlToSend && htmlToSend !== msgPreview.emailHtml;
+    const subjectEdited = editableEmailSubject !== msgPreview.emailSubject;
     setMsgSending(msgPreview.type);
     try {
       const resp = await fetch("/api/messages/send", {
@@ -823,7 +853,8 @@ export default function CalendarPage() {
           reservationId: msgPreview.resId,
           type: msgPreview.type,
           customWaText: editableWaText,
-          ...(emailEditMode ? { customHtml: editableEmailHtml, customSubject: editableEmailSubject } : {}),
+          ...(userEdited ? { customHtml: htmlToSend } : {}),
+          ...(subjectEdited ? { customSubject: editableEmailSubject } : {}),
         }),
       });
       const data = await resp.json();
@@ -1600,7 +1631,23 @@ export default function CalendarPage() {
                       <input value={editableEmailSubject} onChange={e => setEditableEmailSubject(e.target.value)}
                         style={{ width:"100%", padding:"6px 8px", fontSize:"12px", border:"1px solid #d1d5db", borderRadius:"6px", marginTop:"3px" }} />
                     </div>
-                    <button onClick={() => setEmailEditMode(!emailEditMode)}
+                    <button onClick={() => {
+                      // v1.7.1 — Toggle visual ↔ HTML carefully so neither side loses edits.
+                      if (!emailEditMode) {
+                        // Visual → HTML: capture whatever the user typed in the iframe and put it in the textarea.
+                        try {
+                          const doc = emailIframeRef.current?.contentDocument;
+                          if (doc?.documentElement) {
+                            setEditableEmailHtml("<!DOCTYPE html>" + doc.documentElement.outerHTML);
+                          }
+                        } catch (_) {}
+                        setEmailEditMode(true);
+                      } else {
+                        // HTML → Visual: feed the textarea contents back into the iframe (stable srcDoc remount).
+                        setIframeSrcDoc(editableEmailHtml);
+                        setEmailEditMode(false);
+                      }
+                    }}
                       style={{ background: emailEditMode ? "#122943" : "#f3f4f6", color: emailEditMode ? "#C9A84C" : "#6b7280", border:"1px solid #d1d5db", borderRadius:"6px", padding:"5px 10px", fontSize:"11px", fontWeight:"600", cursor:"pointer", whiteSpace:"nowrap", alignSelf:"flex-end" }}
                       title={emailEditMode ? "Превключи към визуално редактиране" : "Превключи към HTML код (за напреднали)"}>
                       {emailEditMode ? "Визуално" : "HTML код"}
@@ -1614,12 +1661,18 @@ export default function CalendarPage() {
                     />
                   ) : (
                     <iframe
-                      key={msgPreview?.type /* re-mount on welcome/depart switch */}
+                      // v1.7.1 — srcDoc reads from the STABLE iframeSrcDoc state,
+                      // NOT from editableEmailHtml. This was the root cause of
+                      // the cursor-jump / scroll-to-top bug: srcDoc={state}
+                      // caused React to remount the iframe on every keystroke
+                      // because we updated state on every input event. Now the
+                      // iframe is mounted ONCE per email-template open (or HTML→
+                      // Visual toggle) and stays stable. The user's edits live
+                      // inside the iframe DOM until Send, which reads them
+                      // straight from contentDocument. No state ↔ DOM ping-pong.
                       ref={(el) => {
+                        emailIframeRef.current = el;
                         if (!el) return;
-                        // Wait for srcDoc to render, then make body editable +
-                        // wire up an input listener that mirrors the user's
-                        // edits back into editableEmailHtml.
                         const wireUp = () => {
                           try {
                             const doc = el.contentDocument;
@@ -1627,23 +1680,14 @@ export default function CalendarPage() {
                             doc.body.contentEditable = "true";
                             doc.body.style.outline = "none";
                             doc.body.style.cursor = "text";
-                            // Avoid duplicate listeners across re-renders.
-                            if ((doc.body as any)._spWired) return;
-                            (doc.body as any)._spWired = true;
-                            doc.body.addEventListener("input", () => {
-                              try {
-                                const html = "<!DOCTYPE html>" + doc.documentElement.outerHTML;
-                                setEditableEmailHtml(html);
-                              } catch (_) {}
-                            });
-                          } catch (_) { /* iframe not ready yet */ }
+                            // No input listener — Send reads live from iframe
+                            // (see sendEmailFromPreview).
+                          } catch (_) { /* not ready yet */ }
                         };
-                        // load fires for srcDoc; some browsers fire it
-                        // synchronously, some asynchronously — try both.
                         el.addEventListener("load", wireUp);
                         wireUp();
                       }}
-                      srcDoc={editableEmailHtml}
+                      srcDoc={iframeSrcDoc}
                       style={{ width:"100%", height:"520px", border:"none" }}
                       sandbox="allow-same-origin"
                       title="Email preview (click to edit)"

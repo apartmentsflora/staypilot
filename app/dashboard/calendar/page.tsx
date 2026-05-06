@@ -1589,19 +1589,21 @@ export default function CalendarPage() {
             <div style={{ flex:1, overflow:"auto" }}>
               {previewTab === "email" ? (
                 <div style={{ padding:"0" }}>
+                  {/* v1.7 — Subject is always an input (it's not part of the HTML body).
+                      The HTML body itself is always shown rendered in an iframe; the
+                      iframe is contenteditable so the operator types and formats
+                      directly on the rendered email — no raw <html> code unless they
+                      explicitly toggle the "HTML код" mode for advanced edits. */}
                   <div style={{ padding:"12px 16px", fontSize:"12px", color:"#6b7280", background:"#f9f8f5", borderBottom:"1px solid #e5e2da", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px" }}>
-                    {emailEditMode ? (
-                      <div style={{ flex:1 }}>
-                        <label style={{ fontSize:"11px", fontWeight:"600", color:"#6b7280" }}>Тема:</label>
-                        <input value={editableEmailSubject} onChange={e => setEditableEmailSubject(e.target.value)}
-                          style={{ width:"100%", padding:"6px 8px", fontSize:"12px", border:"1px solid #d1d5db", borderRadius:"6px", marginTop:"3px" }} />
-                      </div>
-                    ) : (
-                      <div><strong>Тема:</strong> {editableEmailSubject}</div>
-                    )}
+                    <div style={{ flex:1 }}>
+                      <label style={{ fontSize:"11px", fontWeight:"600", color:"#6b7280" }}>Тема:</label>
+                      <input value={editableEmailSubject} onChange={e => setEditableEmailSubject(e.target.value)}
+                        style={{ width:"100%", padding:"6px 8px", fontSize:"12px", border:"1px solid #d1d5db", borderRadius:"6px", marginTop:"3px" }} />
+                    </div>
                     <button onClick={() => setEmailEditMode(!emailEditMode)}
-                      style={{ background: emailEditMode ? "#122943" : "#f3f4f6", color: emailEditMode ? "#C9A84C" : "#6b7280", border:"1px solid #d1d5db", borderRadius:"6px", padding:"5px 10px", fontSize:"11px", fontWeight:"600", cursor:"pointer", whiteSpace:"nowrap" }}>
-                      {emailEditMode ? "Преглед" : "Редактирай"}
+                      style={{ background: emailEditMode ? "#122943" : "#f3f4f6", color: emailEditMode ? "#C9A84C" : "#6b7280", border:"1px solid #d1d5db", borderRadius:"6px", padding:"5px 10px", fontSize:"11px", fontWeight:"600", cursor:"pointer", whiteSpace:"nowrap", alignSelf:"flex-end" }}
+                      title={emailEditMode ? "Превключи към визуално редактиране" : "Превключи към HTML код (за напреднали)"}>
+                      {emailEditMode ? "Визуално" : "HTML код"}
                     </button>
                   </div>
                   {emailEditMode ? (
@@ -1612,10 +1614,39 @@ export default function CalendarPage() {
                     />
                   ) : (
                     <iframe
+                      key={msgPreview?.type /* re-mount on welcome/depart switch */}
+                      ref={(el) => {
+                        if (!el) return;
+                        // Wait for srcDoc to render, then make body editable +
+                        // wire up an input listener that mirrors the user's
+                        // edits back into editableEmailHtml.
+                        const wireUp = () => {
+                          try {
+                            const doc = el.contentDocument;
+                            if (!doc || !doc.body) return;
+                            doc.body.contentEditable = "true";
+                            doc.body.style.outline = "none";
+                            doc.body.style.cursor = "text";
+                            // Avoid duplicate listeners across re-renders.
+                            if ((doc.body as any)._spWired) return;
+                            (doc.body as any)._spWired = true;
+                            doc.body.addEventListener("input", () => {
+                              try {
+                                const html = "<!DOCTYPE html>" + doc.documentElement.outerHTML;
+                                setEditableEmailHtml(html);
+                              } catch (_) {}
+                            });
+                          } catch (_) { /* iframe not ready yet */ }
+                        };
+                        // load fires for srcDoc; some browsers fire it
+                        // synchronously, some asynchronously — try both.
+                        el.addEventListener("load", wireUp);
+                        wireUp();
+                      }}
                       srcDoc={editableEmailHtml}
                       style={{ width:"100%", height:"520px", border:"none" }}
                       sandbox="allow-same-origin"
-                      title="Email preview"
+                      title="Email preview (click to edit)"
                     />
                   )}
                 </div>

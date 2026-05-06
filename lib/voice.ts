@@ -465,21 +465,41 @@ export const ALL_ROOM_CODES = [
 //   "412" is ambiguous: Studio 41-2 (code "41.2") vs Apartment 41-2 (code
 //   "41-2"). Prefer the studio since most guests book it. "414" is
 //   similarly ambiguous between 41.4.1 and 41.4.2 — default to 41.4.1.
+//
+// v1.5 — IMPORTANT: this map is matched EXACTLY (no .startsWith fallback).
+// An earlier version did `stripped.startsWith(key)` which made "4102"
+// false-match "41" → 41.4.1 because the operator says "стая 4102" meaning
+// the ground-floor apartment. The fix: every 4-digit shortcut the operator
+// might say must have its OWN entry. Don't rely on prefix fallback.
 const DIGIT_TO_ROOM: Record<string, string> = {
+  // ── 4-digit "entrance + floor + room" shortcuts ──
+  // Entrance 41
   "4101": "41.0.1",
+  "4102": "Двустаен партер",   // operator's mental "41.0.2" → ground-floor apartment
+  "4111": "41.1.1",
+  "4112": "41.1.2",
+  "4131": "41.3",              // some operators say "41-3-1"
+  "4141": "41.4.1",
+  "4142": "41.4.2",
+  // Entrance 39
   "3901": "39.0.1",
+  "3913": "39.1.3",
+  "3915": "39.1.5",
+  "3924": "39.2.4.1",
+  "3925": "39.2.5",
+  "3955": "39.5.5",
   // Entrance-41 physical numbers said as 3 digits.
   "411":  "41.1.1",
   "412":  "41.2",
   "413":  "41.3",
   "414":  "41.4.1",
   // Entrance-39 / apartment 3-digit shortcuts.
-  "3924": "39.2.4.1",
   "241":  "39.2.4.1",
   "242":  "39.2.4.2",
   "243":  "39.2.4.3",
   "13a":  "39.1.3а",
   "13а":  "39.1.3а",
+  // 2-digit shortcuts (within the spoken-room context only).
   "11":   "41.1.1",
   "12":   "41.1.2",
   "13":   "39.1.3",
@@ -493,6 +513,18 @@ const DIGIT_TO_ROOM: Record<string, string> = {
 };
 // Sorted longest-first for greedy matching
 const DIGIT_ROOM_KEYS = Object.keys(DIGIT_TO_ROOM).sort((a, b) => b.length - a.length);
+
+// v1.5 — Spoken / written aliases that should match the room code BEFORE
+// the digit-strip + ROOM_CODES_BY_LEN scan. Operators say "стая 41.0.2"
+// for the ground-floor apartment whose canonical code is the literal
+// "Двустаен партер" string — without this map the alias falls through.
+// Keys are matched as case-insensitive substrings of the anchored haystack.
+const ROOM_ALIASES: Record<string, string> = {
+  "41.0.2": "Двустаен партер",
+  "41-0-2": "Двустаен партер",
+  "41 0 2": "Двустаен партер",
+};
+const ROOM_ALIAS_KEYS = Object.keys(ROOM_ALIASES).sort((a, b) => b.length - a.length);
 
 // Decades that must be evaluated as "X and Y" or "X alone".
 const DECADE_TOKENS: Array<{ re: RegExp; val: number }> = [
@@ -567,8 +599,17 @@ function roomCodeHaystack(transcript: string): string {
   // period, or reservation-keyword boundary — not just end-of-string.
   // Note: dots and dashes are PART of room codes (e.g., "41.0.1", "41-2"),
   // so they must NOT appear in the stop-character set.
-  // "стаят" / "стаята" are colloquial definite forms of "стая" — must be recognised as room anchors
-  const m = lower.match(/(?:стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+([\p{L}\d\s.\-]+?)(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|едно|две|три|четири|пет|шест|двама|трима|четирима|петима|телефон|тел(?![\p{L}])|бележк|коментар|паркинг|закуск|пристига|заминава|идва|тръгва|чекин|чекаут|check|потвърден|непотвърден|фирмен|корпоратив|от\s+букинг|от\s+еърбнб|airbnb|booking|по\s+\d)|$)/u);
+  // "стаят" / "стаята" are colloquial definite forms of "стая" — must be
+  // recognised as room anchors.
+  //
+  // v1.5 — REMOVED bare cardinal number words (едно, две, три, четири,
+  // пет, шест, двама, трима, четирима, петима) from the stop set. They
+  // were cutting "стая тридесет и девет едно точка три" at "едно" so the
+  // captured slice was just "тридесет и девет" → couldn't normalise to
+  // "39.1.3". The remaining "за\s+" stop still catches guest counts like
+  // "стая 41 за двама". Also added "нощувк/нощи/нощ/ден/дни" stops so
+  // duration phrases don't bleed into the room slice.
+  const m = lower.match(/(?:стая|стаят|стаята|апартамент|апартаментът|стаичка|стаичката|апартаментче|апартаментчето|номер|номерът)\s+([\p{L}\d\s.\-]+?)(?=[,;!?]|\s+(?:от|до|за|на|с\s|със|телефон|тел(?![\p{L}])|бележк|коментар|паркинг|закуск|пристига|заминава|идва|тръгва|чекин|чекаут|check|потвърден|непотвърден|фирмен|корпоратив|от\s+букинг|от\s+еърбнб|airbnb|booking|по\s+\d|нощувк|нощи|нощ\b|ден\b|дни\b)|$)/u);
   return m ? m[1].trim() : lower;
 }
 
@@ -581,6 +622,46 @@ export function matchRoomCode(transcript: string): string | null {
 
   // Normalise Cyrillic "а" → Latin "a" for 1.3A matching throughout.
   const anchoredNorm = anchored.replace(/а/g, "a");
+
+  // 0) v1.5 — Operator aliases first ("41.0.2" → "Двустаен партер").
+  //    Try BOTH the anchored slice AND the full lowercase transcript so
+  //    a no-prefix utterance like "41.0.2, Ирена, 3 нощи" still resolves.
+  for (const alias of ROOM_ALIAS_KEYS) {
+    const a = alias.toLowerCase();
+    if (anchored.includes(a) || lower.includes(a)) return ROOM_ALIASES[alias];
+  }
+
+  // 0.5) v1.5 — Normalize spoken digits/dashes/dots on the FULL transcript
+  //      and try literal room codes BEFORE the digit-strip steps below.
+  //      This is what fixes:
+  //        - "стая 41 тире 2"  → norm "стая 41-2"  → match "41-2"
+  //        - "стая тридесет и девет едно точка три" → norm "стая 39.1.3" → match "39.1.3"
+  //      Without this step, the digit-strip path saw just "41" → 41.4.1.
+  //
+  //      Variants tried, in order:
+  //        norm                            (whatever normalizeCodeTokens produced)
+  //        + spaces-between-digits → "."   ("39 1 3" → "39.1.3")
+  //        + spaces-between-digits → "-"   ("39 1 3" → "39-1-3")
+  {
+    const fullNorm = normalizeCodeTokens(lower);
+    const variants = [
+      fullNorm,
+      fullNorm.replace(/(\d)\s+(?=\d)/g, "$1."),
+      fullNorm.replace(/(\d)\s+(?=\d)/g, "$1-"),
+      fullNorm.replace(/(\d)\s+(?=\d)/g, ""),  // concatenated form
+    ];
+    for (const v of variants) {
+      for (const c of ROOM_CODES_BY_LEN) {
+        const cl = c.toLowerCase();
+        const pos = v.indexOf(cl);
+        if (pos >= 0) {
+          const charBefore = pos > 0 ? v[pos - 1] : "";
+          const charAfter = pos + cl.length < v.length ? v[pos + cl.length] : "";
+          if (!/\d/.test(charBefore) && !/\d/.test(charAfter)) return c;
+        }
+      }
+    }
+  }
 
   // 1) Literal substring, longest first, on the anchored slice.
   //    Also try Cyrillic-а-normalised version.
@@ -610,15 +691,19 @@ export function matchRoomCode(transcript: string): string | null {
   //    ensures "4101" matches before "41".
   //    ONLY when room-context exists — otherwise bare numbers like "13" in
   //    "13 май" would false-match room 1.3.
+  //
+  //    v1.5 — EXACT MATCH ONLY. The previous `stripped.startsWith(dk)`
+  //    fallback caused "4102" to false-match "41" → 41.4.1. Every 4-digit
+  //    shortcut the operator might say must have its own entry in
+  //    DIGIT_TO_ROOM (see the map above).
   if (hasRoomContext) {
     const rawDigitSeqs = anchoredNorm.match(/\d[\d.\-\s]*[\d][.\-\s]?[aаAА]|\d[\d.\-\s]*\d/g);
     if (rawDigitSeqs) {
       for (const seq of rawDigitSeqs) {
         const stripped = seq.replace(/[.\-\s]/g, "").toLowerCase().replace(/а/g, "a");
+        // Exact match only — no prefix fallback.
         for (const dk of DIGIT_ROOM_KEYS) {
-          if (stripped === dk || stripped.startsWith(dk)) {
-            return DIGIT_TO_ROOM[dk];
-          }
+          if (stripped === dk) return DIGIT_TO_ROOM[dk];
         }
       }
     }
@@ -628,14 +713,11 @@ export function matchRoomCode(transcript: string): string | null {
   //     E.g., "1-3-A" or "1.3а" — the digit-seq regex above catches "1-3"
   //     but might miss the trailing letter. Try anchored slice with all
   //     punctuation stripped.
-  //     ONLY safe when there's a room-context word — otherwise "13 май"
-  //     gets fully-stripped to "13май" which startsWith "13" → room 1.3.
+  //     v1.5 — EXACT MATCH only here too.
   if (hasRoomContext) {
     const fullyStripped = anchoredNorm.replace(/[.\-\s,;:!?]/g, "").toLowerCase();
     for (const dk of DIGIT_ROOM_KEYS) {
-      if (fullyStripped === dk || fullyStripped.startsWith(dk)) {
-        return DIGIT_TO_ROOM[dk];
-      }
+      if (fullyStripped === dk) return DIGIT_TO_ROOM[dk];
     }
   }
 
@@ -697,22 +779,26 @@ export function matchRoomCode(transcript: string): string | null {
     }
     for (const seq of digitSeqs) {
       const key = seq.toLowerCase().replace(/а/g, "a");
+      // v1.5 — exact match only (see DIGIT_TO_ROOM comment above)
       for (const dk of DIGIT_ROOM_KEYS) {
-        if (key === dk || key.startsWith(dk)) {
-          return DIGIT_TO_ROOM[dk];
-        }
+        if (key === dk) return DIGIT_TO_ROOM[dk];
       }
     }
 
     // 6) Digit-window: split individual digits/numbers and try joining them.
+    //    v1.5 — also fall back to DIGIT_TO_ROOM lookup so spoken "едно точка
+    //    три" → "1.3" → concatenated "13" → "39.1.3" via the alias map.
     const windowDigits = norm.replace(/[^\d\s]/g, " ").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-    for (let len = Math.min(4, windowDigits.length); len >= 2; len--) {
+    for (let len = Math.min(4, windowDigits.length); len >= 1; len--) {
       for (let i = 0; i + len <= windowDigits.length; i++) {
         const win = windowDigits.slice(i, i + len);
         const candidates = [win.join("."), win.join("-"), win.join("")];
         for (const cand of candidates) {
           const match = ROOM_CODES_BY_LEN.find(c => c.toLowerCase() === cand.toLowerCase());
           if (match) return match;
+          // DIGIT_TO_ROOM fallback (concatenated form)
+          const concat = win.join("").toLowerCase();
+          if (DIGIT_TO_ROOM[concat]) return DIGIT_TO_ROOM[concat];
         }
       }
     }
@@ -827,6 +913,10 @@ const NAME_STOP = new Set<string>(
     "резервация", "резервирай", "резервацията", "стая", "стаят", "стаята",
     "апартамент", "апартаментът", "стаичка", "стаичката",
     "апартаментче", "апартаментчето", "номер", "номерът",
+    // v1.5 — "Нова резервация" prefix words. Without these, "Нова резервация
+    // Ирена Апостолова" extracted as name "Нова Ирена" (the capitalised
+    // "Нова" was being grabbed as the first name token).
+    "нова", "нов", "ново", "новата", "новия", "новото", "новите",
     "телефон", "тел", "бележка", "коментар", "забележка",
     "следващия", "следващата", "следващите", "другия", "другата", "идния", "идната",
     "нощувка", "нощувки", "нощи", "нощ", "дни", "ден", "дена", "седмица", "седмици",
@@ -1831,6 +1921,27 @@ export function parseVoice(text: string, defaultYear: number, nowDate?: Date): P
   if (start && !end) {
     const n = extractDurationNights(s);
     if (n != null) {
+      const d = new Date(start + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n);
+      end = isoOf(d);
+    }
+  }
+
+  // v1.5 — Duration-only utterance ("една нощувка", "3 нощи", "една
+  // нощувка днес") with no explicit start date → assume today.
+  // Examples this rescues:
+  //   "Ирена Апостолова, стая 4102, една нощувка."
+  //   "стая 41-2, две нощувки."
+  //   "Георгий, днес пристига за една нощувка."
+  // The date-finder above already handles "днес" / "утре" as start when
+  // they appear, but if NEITHER an explicit date NOR a "днес/утре" word
+  // is present and the operator just said a duration, defaulting to today
+  // is the obviously-right behavior — any other choice means the operator
+  // has to repeat themselves.
+  if (!start && !end) {
+    const n = extractDurationNights(s);
+    if (n != null && n >= 1 && n <= 60) {
+      const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+      start = isoOf(today);
       const d = new Date(start + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n);
       end = isoOf(d);
     }

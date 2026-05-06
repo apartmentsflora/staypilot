@@ -50,9 +50,13 @@ function buildTemplateData(res: any): TemplateData {
   const nights = Math.max(1, Math.round(
     (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000
   ));
-  const childSurcharge = (Number(res.children) || 0) * 12.5;
-  const cotSurcharge = (Number(res.cots) || 0) * 25;
-  const total = `€${Math.round(((Number(res.pricePerNight) || 0) + childSurcharge + cotSurcharge) * nights)}`;
+  // v1.7.12 — Match Flora's occupancy-based pricing rule. The website
+  // already bakes the room rate, sub-cap discount, +1 extra-kid surcharge,
+  // and cot fee into `pricePerNight` at booking time — so emails should
+  // NOT re-add child or cot surcharges (which would double-charge guests
+  // on the displayed total). For OTA bookings, pricePerNight is what the
+  // OTA charged; child/cot are not separately tracked there either.
+  const total = `€${Math.round((Number(res.pricePerNight) || 0) * nights)}`;
   const lang = (res.guestLang || "en") as GuestLang;
 
   return {
@@ -125,6 +129,32 @@ export async function GET() {
       .neq("email", "");
 
     for (const res of (welcomeList || [])) {
+      // ── ATOMIC CLAIM ──
+      // Bug fix (Ivan reported "20 emails sent for 1 reservation"): the
+      // SyncEvent rate limit only inserts at the END of this handler, so
+      // concurrent calls (multiple browser tabs polling, webhook + cron
+      // overlap, Netlify retry on a slow function) ALL pass the gate, all
+      // see welcomeSentAt=null, and all send the welcome email before any
+      // of them updates the row. Result: N concurrent runs = N duplicate
+      // emails to the same guest.
+      //
+      // Atomic-claim pattern: use a conditional UPDATE that only succeeds
+      // if welcomeSentAt is still null. Postgres serializes this — only
+      // one concurrent run wins the row, the rest see 0 rows updated and
+      // skip. If the email send subsequently fails, we release the claim
+      // so a future run retries.
+      const claimAt = new Date().toISOString();
+      const { data: claimed, error: claimErr } = await supabaseAdmin
+        .from("Reservation")
+        .update({ welcomeSentAt: claimAt })
+        .eq("id", res.id)
+        .is("welcomeSentAt", null)
+        .select("id")
+        .maybeSingle();
+      if (claimErr || !claimed) {
+        // Either DB error or another concurrent run already claimed it.
+        continue;
+      }
       try {
         const td = buildTemplateData(res);
         const lang = (res.guestLang || "en") as GuestLang;
@@ -134,14 +164,20 @@ export async function GET() {
           subject: welcomeEmailSubject(td.guestName, lang),
           html: welcomeEmailHtml(td),
         });
-        await supabaseAdmin
-          .from("Reservation")
-          .update({ welcomeSentAt: new Date().toISOString() })
-          .eq("id", res.id);
         welcomeSent++;
       } catch (e: any) {
         console.error(`[auto-send] welcome failed for ${res.id}:`, e.message);
         errors++;
+        // Release the claim so the next run retries this reservation.
+        // Guard with .eq(welcomeSentAt, claimAt) so we don't clobber a
+        // value some other code-path may have written in the meantime.
+        try {
+          await supabaseAdmin
+            .from("Reservation")
+            .update({ welcomeSentAt: null })
+            .eq("id", res.id)
+            .eq("welcomeSentAt", claimAt);
+        } catch { /* best-effort */ }
       }
     }
   } catch (e: any) {
@@ -166,6 +202,20 @@ export async function GET() {
         .neq("email", "");
 
       for (const res of (farewellList || [])) {
+        // ATOMIC CLAIM — same race-fix as the welcome loop above.
+        // Concurrent runs would otherwise all see farewellSentAt=null and
+        // all dispatch the same farewell email before any of them updated
+        // the row. Conditional UPDATE that only succeeds when the column
+        // is still null serializes the claim across runs.
+        const claimAt = new Date().toISOString();
+        const { data: claimed, error: claimErr } = await supabaseAdmin
+          .from("Reservation")
+          .update({ farewellSentAt: claimAt })
+          .eq("id", res.id)
+          .is("farewellSentAt", null)
+          .select("id")
+          .maybeSingle();
+        if (claimErr || !claimed) continue;
         try {
           const td = buildTemplateData(res);
           const lang = (res.guestLang || "en") as GuestLang;
@@ -175,14 +225,17 @@ export async function GET() {
             subject: farewellEmailSubject(td.guestName, lang),
             html: farewellEmailHtml(td),
           });
-          await supabaseAdmin
-            .from("Reservation")
-            .update({ farewellSentAt: new Date().toISOString() })
-            .eq("id", res.id);
           farewellSent++;
         } catch (e: any) {
           console.error(`[auto-send] farewell failed for ${res.id}:`, e.message);
           errors++;
+          try {
+            await supabaseAdmin
+              .from("Reservation")
+              .update({ farewellSentAt: null })
+              .eq("id", res.id)
+              .eq("farewellSentAt", claimAt);
+          } catch { /* best-effort */ }
         }
       }
     } catch (e: any) {

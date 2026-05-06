@@ -123,18 +123,29 @@ export async function GET() {
 
       if (isCancelled) {
         if (existing && existing.status !== "CANCELLED") {
-          await supabaseAdmin.from("Reservation")
+          // v1.7.12 — Atomic cancel claim. Two concurrent polls can both
+          // see existing.status !== "CANCELLED" between SELECT and UPDATE
+          // and both fire a CANCEL notification. Filter the UPDATE on the
+          // CONFIRMED status so only one wins; if .select() returns 0 rows
+          // we know another worker beat us → skip the notify.
+          const { data: claimed } = await supabaseAdmin.from("Reservation")
             .update({ status: "CANCELLED", cancelledAt: new Date().toISOString() })
-            .eq("id", existing.id);
-          try {
-            await notify({
-              type: "CANCEL",
-              title: `Beds24 · Poll · Анулиране · ${roomCode}`,
-              detail: `${guestName} · ${arrival} – ${departure}`,
-              reservationId: existing.id,
-            });
-          } catch { /* non-fatal */ }
-          cancelled++;
+            .eq("id", existing.id)
+            .neq("status", "CANCELLED")
+            .select("id");
+          if (claimed && claimed.length > 0) {
+            try {
+              await notify({
+                type: "CANCEL",
+                title: `Beds24 · Poll · Анулиране · ${roomCode}`,
+                detail: `${guestName} · ${arrival} – ${departure}`,
+                reservationId: existing.id,
+              });
+            } catch { /* non-fatal */ }
+            cancelled++;
+          } else {
+            skipped++;
+          }
         } else {
           skipped++;
         }

@@ -67,9 +67,9 @@ export async function POST(req: Request) {
   const nights = Math.max(1, Math.round(
     (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000
   ));
-  const childSurcharge = (Number(res.children) || 0) * 12.5;
-  const cotSurcharge = (Number(res.cots) || 0) * 25;
-  const total = `€${Math.round(((Number(res.pricePerNight) || 0) + childSurcharge + cotSurcharge) * nights)}`;
+  // v1.7.12 — Same simplification as auto-send: don't re-add child/cot
+  // surcharges; pricePerNight already reflects them (Flora occupancy rule).
+  const total = `€${Math.round((Number(res.pricePerNight) || 0) * nights)}`;
 
   const lang = (res.guestLang || "en") as GuestLang;
 
@@ -114,6 +114,36 @@ export async function POST(req: Request) {
       return NextResponse.json({
         emailSent: false,
         emailError: "Capaparo reminder already sent for this reservation",
+        waLink: null,
+        type,
+        guestName: td.guestName,
+      });
+    }
+  }
+
+  // v1.7.12 — Same atomic-claim pattern for welcome and farewell. Without
+  // this, an operator clicking "Send" while the auto-send cron is mid-run
+  // results in TWO emails. (Auto-send was already patched in
+  // /api/messages/auto-send to do the claim there too.) The losing caller
+  // here returns "already sent" without firing a duplicate.
+  const tsClaimColumn = type === "welcome" ? "welcomeSentAt"
+                       : type === "farewell" ? "farewellSentAt"
+                       : null;
+  let tsClaimAt: string | null = null;
+  if (tsClaimColumn) {
+    tsClaimAt = new Date().toISOString();
+    const { data: tsClaimed } = await supabaseAdmin
+      .from("Reservation")
+      .update({ [tsClaimColumn]: tsClaimAt })
+      .eq("id", reservationId)
+      .is(tsClaimColumn, null)
+      .select("id");
+    if (!tsClaimed || tsClaimed.length === 0) {
+      return NextResponse.json({
+        emailSent: false,
+        emailError: type === "welcome"
+          ? "Welcome email already sent for this reservation"
+          : "Farewell email already sent for this reservation",
         waLink: null,
         type,
         guestName: td.guestName,
@@ -167,6 +197,19 @@ export async function POST(req: Request) {
             .eq("caparoReminderSentAt", caparoClaimAt);
         } catch { /* best-effort */ }
       }
+      // v1.7.12 — Same release for welcome/farewell. We claimed the
+      // timestamp BEFORE attempting the send, so a failed send must
+      // free the claim or the row is permanently marked "sent" with
+      // no email actually delivered.
+      if (tsClaimColumn && tsClaimAt) {
+        try {
+          await supabaseAdmin
+            .from("Reservation")
+            .update({ [tsClaimColumn]: null })
+            .eq("id", reservationId)
+            .eq(tsClaimColumn, tsClaimAt);
+        } catch { /* best-effort */ }
+      }
     }
   }
 
@@ -180,18 +223,16 @@ export async function POST(req: Request) {
     waLink = whatsappLink(res.phone, waText);
   }
 
-  // ── Update sent timestamp ─────────────────────────────────────────────────
-  // welcome/farewell write here; caparo already claimed its timestamp at the
-  // top of the handler so we skip — re-writing would needlessly bump the value.
-  const tsColumn = type === "welcome" ? "welcomeSentAt"
-                 : type === "farewell" ? "farewellSentAt"
-                 : null;
-  if (tsColumn && (emailSent || waLink)) {
-    await supabaseAdmin
-      .from("Reservation")
-      .update({ [tsColumn]: new Date().toISOString() })
-      .eq("id", reservationId);
-  }
+  // v1.7.12 — Trailing "mark as sent" block removed. We now claim the
+  // timestamp at the TOP of the handler (before sendMail), and release
+  // it in the catch if the send fails. So:
+  //   • emailSent === true   → claim stays, row correctly marked sent.
+  //   • email send threw     → claim was released in catch, row stays null.
+  //   • only waLink returned → DO NOT mark welcomeSentAt. Generating a
+  //     wa.me link is not the same as actually sending. Operator must
+  //     click it; if/when they do, that's tracked separately. (Old code
+  //     marked welcomeSentAt on waLink alone — false-positive.)
+  // Caparo's claim happened at the top too — already correct.
 
   return NextResponse.json({
     emailSent,

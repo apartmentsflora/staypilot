@@ -1291,11 +1291,17 @@ export default function CalendarPage() {
                     </span>
                   </label>
                 </div>
+                {/* v1.7.12 — Aligned with Flora's occupancy-based pricing.
+                    Kids inside cap are free; the per-night rate is what the
+                    operator types into "Цена/нощ". Email totals = rate × nights,
+                    so the form preview must show the same number (no extra
+                    €12.50/kid or €25/cot baked in here). If the operator wants
+                    to charge for a cot or extra kid, bump pricePerNight directly. */}
                 <div style={{ background:"#f5f3ff", border:"1px solid #ddd3fe", borderRadius:"8px", padding:"9px 13px", marginTop:"9px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                   <div style={{ fontSize:"12px", color:"#6c63ff" }}>
-                    {nights} нощи · {Number(form.guests)||0} възр. · {Number(form.children)||0} деца{(Number(form.children)||0) > 0 ? ` (+€${((Number(form.children)||0) * 12.5).toFixed(2)}/нощ)` : ""}{(Number(form.cots)||0) > 0 ? ` · ${Number(form.cots)} кош. (+€${((Number(form.cots)||0) * 25).toFixed(2)}/нощ)` : ""}
+                    {nights} нощи · {Number(form.guests)||0} възр. · {Number(form.children)||0} деца{(Number(form.cots)||0) > 0 ? ` · ${Number(form.cots)} кош.` : ""}
                   </div>
-                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round(((Number(form.pricePerNight)||0) + (Number(form.children)||0) * 12.5 + (Number(form.cots)||0) * 25) * nights)}</div>
+                  <div style={{ fontSize:"19px", fontWeight:"700", color:"#4c1d95" }}>€{Math.round((Number(form.pricePerNight)||0) * nights)}</div>
                 </div>
                 <div style={{ display:"flex", gap:"7px", marginTop:"11px", flexWrap:"wrap" }}>
                   <button onClick={saveRes} style={{ background:"#6c63ff", color:"#fff", border:"none", borderRadius:"8px", padding:"9px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer" }}>

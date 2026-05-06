@@ -56,9 +56,10 @@ export async function POST(req: Request) {
   const nights = Math.max(1, Math.round(
     (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000
   ));
-  const childSurcharge = (Number(res.children) || 0) * 12.5;
-  const cotSurcharge = (Number(res.cots) || 0) * 25;
-  const total = `€${Math.round(((Number(res.pricePerNight) || 0) + childSurcharge + cotSurcharge) * nights)}`;
+  // v1.7.12 — Match Flora's occupancy-based pricing. pricePerNight is
+  // the final per-night rate (kids inside cap free, +1 over-cap kid baked
+  // in, cot already counted), so no extra surcharges needed.
+  const total = `€${Math.round((Number(res.pricePerNight) || 0) * nights)}`;
   const lang = (res.guestLang || "en") as GuestLang;
 
   const td: TemplateData = {

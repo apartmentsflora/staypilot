@@ -34,9 +34,9 @@ function buildTemplateData(res: any): TemplateData {
   const nights = Math.max(1, Math.round(
     (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000
   ));
-  const childSurcharge = (Number(res.children) || 0) * 12.5;
-  const cotSurcharge = (Number(res.cots) || 0) * 25;
-  const total = `€${Math.round(((Number(res.pricePerNight) || 0) + childSurcharge + cotSurcharge) * nights)}`;
+  // v1.7.12 — pricePerNight already includes occupancy/cot/extra-kid baked
+  // by Flora at booking time; do not re-add the surcharges here.
+  const total = `€${Math.round((Number(res.pricePerNight) || 0) * nights)}`;
   const lang = (res.guestLang || "en") as GuestLang;
   const fmt = (iso: string) => {
     const d = new Date(iso);
